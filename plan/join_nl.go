@@ -26,6 +26,7 @@ type NLJoin struct {
 	child       Operator
 	filter      expression.Expression
 	cost        float64
+	cumCost     float64
 	cardinality float64
 }
 
@@ -39,6 +40,21 @@ func NewNLJoin(join *algebra.AnsiJoin, child Operator, filter expression.Express
 		child:       child,
 		filter:      filter,
 		cost:        cost,
+		cardinality: cardinality,
+	}
+}
+
+func NewNLJoinJE(child Operator, outer bool, onClause expression.Expression, alias string, filter expression.Expression,
+	cost, cumCost, cardinality float64) *NLJoin {
+	return &NLJoin{
+		outer:       outer,
+		alias:       alias,
+		onclause:    onClause,
+		hintError:   "",
+		child:       child,
+		filter:      filter,
+		cost:        cost,
+		cumCost:     cumCost,
 		cardinality: cardinality,
 	}
 }
@@ -71,12 +87,20 @@ func (this *NLJoin) Child() Operator {
 	return this.child
 }
 
+func (this *NLJoin) SetHintError(hintErr string) {
+	this.hintError = hintErr
+}
+
 func (this *NLJoin) Filter() expression.Expression {
 	return this.filter
 }
 
 func (this *NLJoin) Cost() float64 {
-	return this.cost
+	return this.cumCost // to maintain compatibility with current explain
+}
+
+func (this *NLJoin) CumCost() float64 {
+	return this.cumCost
 }
 
 func (this *NLJoin) Cardinality() float64 {

@@ -63,6 +63,11 @@ func (this *builder) buildScan(keyspace datastore.Keyspace, node *algebra.Keyspa
 
 	join := node.IsAnsiJoinOp()
 	hash := node.IsUnderHash()
+	optimizer := this.context.Optimizer()
+	if this.useCBO && optimizer != nil && optimizer.UseNewOptimizer() == true {
+		join = false
+		hash = false
+	}
 
 	var hints []datastore.Index
 	if len(node.Indexes()) > 0 || this.context.UseFts() {
@@ -137,27 +142,42 @@ func (this *builder) buildScan(keyspace datastore.Keyspace, node *algebra.Keyspa
 		}
 	}
 
-	if join && !hash {
-		op := "join"
-		if node.IsAnsiNest() {
-			op = "nest"
+	if !this.SecondaryScan() {
+		if join && !hash {
+			op := "join"
+			if node.IsAnsiNest() {
+				op = "nest"
+			}
+			return nil, nil, errors.NewNoAnsiJoinError(node.Alias(), op)
+		} else if this.cover != nil && baseKeyspace.DnfPred() == nil {
+			// Handle covering primary scan
+			scan, err := this.buildCoveringPrimaryScan(keyspace, node, id, hints)
+			if scan != nil || err != nil {
+				return scan, nil, err
+			}
 		}
-		return nil, nil, errors.NewNoAnsiJoinError(node.Alias(), op)
-	} else if this.cover != nil && baseKeyspace.DnfPred() == nil {
-		// Handle covering primary scan
-		scan, err := this.buildCoveringPrimaryScan(keyspace, node, id, hints)
-		if scan != nil || err != nil {
-			return scan, nil, err
-		}
-	}
 
-	primary, err = this.buildPrimaryScan(keyspace, node, hints, id, false, true, hasDeltaKeyspace)
-	return nil, primary, err
+		primary, err = this.buildPrimaryScan(keyspace, node, hints, id, false, true, hasDeltaKeyspace)
+		return nil, primary, err
+	} else {
+		return nil, nil, nil
+	}
 }
 
 func (this *builder) buildPredicateScan(keyspace datastore.Keyspace, node *algebra.KeyspaceTerm,
 	baseKeyspace *base.BaseKeyspace, id expression.Expression, hints []datastore.Index) (
 	secondary plan.Operator, primary plan.Operator, err error) {
+
+	join := node.IsAnsiJoinOp()
+	hash := node.IsUnderHash()
+	nlj := node.IsUnderNL()
+	prjoin := node.IsPrimaryJoin()
+	optimizer := this.context.Optimizer()
+	if this.useCBO && optimizer != nil && optimizer.UseNewOptimizer() == true {
+		join = false
+		hash = false
+		nlj = false
+	}
 
 	// Handle constant FALSE predicate
 	cpred := baseKeyspace.OrigPred().Value()
@@ -167,7 +187,7 @@ func (this *builder) buildPredicateScan(keyspace datastore.Keyspace, node *algeb
 
 	// do not consider primary index for ANSI JOIN or ANSI NEST
 	var primaryKey expression.Expressions
-	if !node.IsAnsiJoinOp() || node.IsUnderHash() {
+	if !join || hash {
 		primaryKey = expression.Expressions{id}
 	}
 
@@ -186,9 +206,9 @@ func (this *builder) buildPredicateScan(keyspace datastore.Keyspace, node *algeb
 
 	// collect SEARCH() functions that depends on current keyspace in the predicate
 	var searchFns map[string]*search.Search
-	if !node.IsUnderNL() {
+	if !nlj {
 		pred := baseKeyspace.DnfPred()
-		if node.IsAnsiJoinOp() && baseKeyspace.OnclauseOnly() {
+		if join && baseKeyspace.OnclauseOnly() {
 			pred = baseKeyspace.Onclause()
 		}
 
@@ -217,8 +237,8 @@ func (this *builder) buildPredicateScan(keyspace datastore.Keyspace, node *algeb
 		return
 	}
 
-	if node.IsAnsiJoinOp() {
-		if node.IsPrimaryJoin() || node.IsUnderHash() {
+	if join {
+		if prjoin || hash {
 			return nil, nil, nil
 		} else {
 			op := "join"
@@ -239,6 +259,11 @@ func (this *builder) buildSubsetScan(keyspace datastore.Keyspace, node *algebra.
 
 	join := node.IsAnsiJoinOp()
 	hash := node.IsUnderHash()
+	optimizer := this.context.Optimizer()
+	if this.useCBO && optimizer != nil && optimizer.UseNewOptimizer() == true {
+		join = false
+		hash = false
+	}
 	if join {
 		this.resetPushDowns()
 	}
@@ -249,19 +274,21 @@ func (this *builder) buildSubsetScan(keyspace datastore.Keyspace, node *algebra.
 	if join && baseKeyspace.OnclauseOnly() {
 		pred = baseKeyspace.Onclause()
 	}
-	if or, ok := pred.(*expression.Or); ok {
+	if !this.PrimaryScan() {
+		if or, ok := pred.(*expression.Or); ok {
 
-		scan, _, err := this.buildOrScan(node, baseKeyspace, id, or, indexes, primaryKey, formalizer)
+			scan, _, err := this.buildOrScan(node, baseKeyspace, id, or, indexes, primaryKey, formalizer)
 
-		if scan != nil || err != nil {
-			return scan, nil, err
+			if scan != nil || err != nil {
+				return scan, nil, err
+			}
 		}
-	}
 
-	// Prefer secondary scan
-	secondary, _, err = this.buildTermScan(node, baseKeyspace, id, indexes, primaryKey, formalizer)
-	if secondary != nil || err != nil {
-		return secondary, nil, err
+		// Prefer secondary scan
+		secondary, _, err = this.buildTermScan(node, baseKeyspace, id, indexes, primaryKey, formalizer)
+		if secondary != nil || err != nil {
+			return secondary, nil, err
+		}
 	}
 
 	if !join || hash {
@@ -285,6 +312,12 @@ func (this *builder) buildTermScan(node *algebra.KeyspaceTerm,
 	secondary plan.SecondaryScan, sargLength int, err error) {
 
 	join := node.IsAnsiJoinOp()
+	nlj := node.IsUnderNL()
+	optimizer := this.context.Optimizer()
+	if this.useCBO && optimizer != nil && optimizer.UseNewOptimizer() == true {
+		join = false
+		nlj = false
+	}
 
 	var scanbuf [4]plan.SecondaryScan
 	scans := scanbuf[0:1]
@@ -316,7 +349,7 @@ func (this *builder) buildTermScan(node *algebra.KeyspaceTerm,
 	}
 
 	sargables, all, arrays, flex, err := this.sargableIndexes(indexes, pred, pred, primaryKey,
-		formalizer, ubs, node.IsUnderNL())
+		formalizer, ubs, nlj)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -328,7 +361,7 @@ func (this *builder) buildTermScan(node *algebra.KeyspaceTerm,
 	// pred has SEARCH() function get sargable FTS indexes
 	var searchSargables []*indexEntry
 	var searchFns map[string]*search.Search
-	if !node.IsUnderNL() {
+	if !nlj {
 		searchFns = make(map[string]*search.Search)
 		if err = collectFTSSearch(node.Alias(), searchFns, pred); err != nil {
 			return nil, 0, err

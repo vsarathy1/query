@@ -938,6 +938,432 @@ func (this *builder) buildHashJoinScan(right algebra.SimpleFromTerm, outer bool,
 	return child, buildExprs, probeExprs, buildAliases, newOnclause, newFilter, cost, cardinality, nil
 }
 
+func (this *builder) constructHashJoin(right algebra.SimpleFromTerm, onClause []expression.Expression, leftPlan IntermediatePlan, rightPlan IntermediatePlan, outer bool,
+	filter expression.Expression, selec float64, joinCardinality float64, op string) (hjoin *plan.HashJoin, probePlan []plan.Operator, err error) {
+
+	var ksterm *algebra.KeyspaceTerm
+	var keyspace string
+	var defaultBuildRight bool
+
+	var andedOnClause expression.Expression
+	for idx, expr := range onClause {
+		if idx == 0 {
+			andedOnClause = expr.Copy()
+		} else {
+			andedOnClause = expression.NewAnd(andedOnClause, expr.Copy())
+		}
+	}
+	if ksterm = algebra.GetKeyspaceTerm(right); ksterm != nil {
+		right = ksterm
+	}
+
+	switch right := right.(type) {
+	case *algebra.KeyspaceTerm:
+		// if USE HASH and USE KEYS are specified together, make sure the document key
+		// expressions does not reference any keyspaces, otherwise hash join cannot be
+		// used.
+		if ksterm.Keys() != nil && ksterm.Keys().Static() == nil {
+			return nil, nil, nil
+		}
+		keyspace = ksterm.Keyspace()
+	case *algebra.ExpressionTerm:
+		// hash join cannot handle expression term with any correlated references
+		if right.IsCorrelated() {
+			return nil, nil, nil
+		}
+		defaultBuildRight = true
+	case *algebra.SubqueryTerm:
+		// hash join cannot handle correlated subquery
+		if right.Subquery().IsCorrelated() {
+			return nil, nil, nil
+		}
+
+		defaultBuildRight = true
+	default:
+		return nil, nil, errors.NewPlanInternalError(fmt.Sprintf("buildHashJoinScan: unexpected right-hand side node type"))
+	}
+
+	useCBO := this.useCBO
+	buildRight := false
+	force := true
+	joinHint := right.JoinHint()
+	if joinHint == algebra.USE_HASH_BUILD {
+		buildRight = true
+	} else if joinHint == algebra.USE_HASH_PROBE {
+		// in case of outer join, cannot build on dominant side
+		// also in case of nest, can only build on right-hand-side
+		if outer || op == "nest" {
+			return nil, nil, nil
+		}
+	} else if outer || op == "nest" {
+		// for outer join or nest, must build on right-hand side
+		buildRight = true
+	} else if defaultBuildRight {
+		// for expression term and subquery term, if no USE HASH hint is
+		// specified, then consider hash join/nest with the right-hand side
+		// as build side
+		buildRight = true
+		force = false
+	} else {
+		force = false
+	}
+
+	alias := right.Alias()
+
+	keyspaceNames := make(map[string]string, 1)
+	keyspaceNames[alias] = keyspace
+
+	leftExprs := make(expression.Expressions, 0, 4)
+	rightExprs := make(expression.Expressions, 0, 4)
+	for _, expr := range onClause {
+		if eqFltr, ok := expr.(*expression.Eq); ok {
+			if ok == false {
+				return nil, nil, nil
+			}
+			// make sure only one side of the equality predicate references
+			// alias (which is right-hand-side of the join)
+			firstRef := expression.HasKeyspaceReferences(eqFltr.First(), keyspaceNames)
+			secondRef := expression.HasKeyspaceReferences(eqFltr.Second(), keyspaceNames)
+
+			found := false
+			if firstRef && !secondRef {
+				rightExprs = append(rightExprs, eqFltr.First().Copy())
+				leftExprs = append(leftExprs, eqFltr.Second().Copy())
+				found = true
+			} else if !firstRef && secondRef {
+				leftExprs = append(leftExprs, eqFltr.First().Copy())
+				rightExprs = append(rightExprs, eqFltr.Second().Copy())
+				found = true
+			}
+			if found == false {
+				return nil, nil, nil
+			}
+		}
+	}
+
+	//	baseKeyspace, _ := this.baseKeyspaces[alias]
+	//	filters := baseKeyspace.JoinFilters()
+
+	if len(leftExprs) == 0 || len(rightExprs) == 0 {
+		return nil, nil, nil
+	}
+
+	// Note that by this point join filters involving keyspaces that's already done planning
+	// are already moved into filters and thus is available for index selection. This is ok
+	// if we are doing nested-loop join. However, for hash join, since both sides of the
+	// hash join are independent of each other, we cannot use join filters for index selection
+	// when planning for the right-hand side.
+
+	if ksterm != nil {
+		ksterm.SetUnderHash()
+		defer func() {
+			ksterm.UnsetUnderHash()
+		}()
+	}
+
+	// if no right plan generated, bail out
+	if len(rightPlan.GetPlan()) == 0 {
+		return nil, nil, nil
+	}
+
+	// perform cover transformation of leftExprs and rightExprs and onclause
+	var newFilter expression.Expression
+	if filter != nil {
+		newFilter = filter.Copy()
+	}
+
+	newOnclause := andedOnClause.Copy()
+
+	if len(rightPlan.GetCoveringScans()) > 0 {
+		for _, op := range rightPlan.GetCoveringScans() {
+			coverer := expression.NewCoverer(op.Covers(), op.FilterCovers())
+
+			if newFilter != nil {
+				newFilter, err = coverer.Map(newFilter)
+				if err != nil {
+					return nil, nil, err
+				}
+			}
+
+			newOnclause, err = coverer.Map(newOnclause)
+			if err != nil {
+				return nil, nil, err
+			}
+
+			for i, _ := range rightExprs {
+				rightExprs[i], err = coverer.Map(rightExprs[i])
+				if err != nil {
+					return nil, nil, err
+				}
+			}
+		}
+	}
+
+	if len(leftPlan.GetCoveringScans()) > 0 {
+		for _, op := range leftPlan.GetCoveringScans() {
+			coverer := expression.NewCoverer(op.Covers(), op.FilterCovers())
+
+			if newFilter != nil {
+				newFilter, err = coverer.Map(newFilter)
+				if err != nil {
+					return nil, nil, err
+				}
+			}
+
+			newOnclause, err = coverer.Map(newOnclause)
+			if err != nil {
+				return nil, nil, err
+			}
+
+			for i, _ := range leftExprs {
+				leftExprs[i], err = coverer.Map(leftExprs[i])
+				if err != nil {
+					return nil, nil, err
+				}
+			}
+		}
+	}
+
+	var cost, cardinality float64
+	var child plan.Operator
+	var probeExprs, buildExprs expression.Expressions
+	var buildAliases []string
+
+	if useCBO {
+		var bldRight bool
+		cost, cardinality, bldRight = getHashJoinCost2(leftPlan.GetLastOp(), rightPlan.GetLastOp(), leftExprs, rightExprs, joinCardinality, buildRight, force, outer, op)
+		if cost > 0.0 && cardinality > 0.0 {
+			buildRight = bldRight
+		}
+	} else {
+		cost = OPT_COST_NOT_AVAIL
+		cardinality = OPT_COST_NOT_AVAIL
+	}
+
+	leftPlanCopy := leftPlan.Copy()
+	rightPlanCopy := rightPlan.Copy()
+	if buildRight {
+		if len(rightPlan.GetSubChildren()) > 0 {
+			rightPlanCopy.AddChildren(rightPlanCopy.AddSubchildrenParallel())
+		}
+
+		child = plan.NewSequence(rightPlanCopy.GetPlan()...)
+		if len(leftPlan.GetSubChildren()) > 0 {
+			leftPlanCopy.AddChildren(leftPlanCopy.AddSubchildrenParallel())
+		}
+		probePlan = leftPlanCopy.GetPlan()
+		probeExprs = leftExprs
+		buildExprs = rightExprs
+		buildAliases = []string{alias}
+	} else {
+		if len(leftPlan.GetSubChildren()) > 0 {
+			leftPlanCopy.AddChildren(leftPlanCopy.AddSubchildrenParallel())
+		}
+		if len(rightPlan.GetSubChildren()) > 0 {
+			rightPlanCopy.AddChildren(rightPlanCopy.AddSubchildrenParallel())
+		}
+		probePlan = rightPlanCopy.GetPlan()
+		child = plan.NewSequence(leftPlanCopy.GetPlan()...)
+		buildExprs = leftExprs
+		probeExprs = rightExprs
+		buildAliases = leftPlanCopy.GetBaseKeyspaceNames()
+	}
+
+	if err != nil || child == nil {
+		// cannot do hash join
+		return nil, nil, err
+	}
+	if this.useCBO && (cost > 0.0) && (cardinality > 0.0) && (selec > 0.0) && (filter != nil) {
+		selec = this.adjustForHashFilters(right.Alias(), andedOnClause, selec)
+		cost, cardinality = getSimpleFilterCost(cost, cardinality, selec)
+	}
+	//	if newOnclause != nil {
+	//		node.SetOnclause(newOnclause)
+	//	}
+	cumCost := leftPlan.GetCumCost() + rightPlan.GetCumCost() + cost
+	return plan.NewHashJoinJE(child, false, newOnclause, buildExprs, probeExprs, buildAliases, newFilter, cost, cumCost, joinCardinality), probePlan, nil
+}
+
+func (this *builder) constructNLJoin(right algebra.SimpleFromTerm, onClause []expression.Expression, andedOnClause expression.Expression, origJoinFilters base.Filters, leftPlan IntermediatePlan, rightPlan IntermediatePlan, filter expression.Expression, joinCardinality float64, outer bool, op string) (
+	IntermediatePlan, IntermediatePlan /*[]plan.Operator, []plan.Operator, */, expression.Expression, expression.Expression, expression.Expression, float64, float64, error) {
+
+	baseKeyspace, _ := this.baseKeyspaces[right.Alias()]
+
+	// check whether joining on meta().id
+	id := expression.NewField(
+		expression.NewMeta(expression.NewIdentifier(right.Alias())),
+		expression.NewFieldName("id", false))
+
+	var primaryJoinKeys expression.Expression
+	for _, fltr := range onClause { //range baseKeyspace.Filters() {
+		//		if fltr.IsOnclause() {
+		if eqFltr, ok := fltr.(*expression.Eq); ok {
+			if eqFltr.First().EquivalentTo(id) {
+				//right.SetPrimaryJoin()
+				primaryJoinKeys = eqFltr.Second().Copy()
+				break
+			} else if eqFltr.Second().EquivalentTo(id) {
+				//node.SetPrimaryJoin()
+				primaryJoinKeys = eqFltr.First().Copy()
+				break
+			}
+		} else if inFltr, ok := fltr.(*expression.In); ok {
+			if inFltr.First().EquivalentTo(id) {
+				//node.SetPrimaryJoin()
+				primaryJoinKeys = inFltr.Second().Copy()
+				break
+			}
+		}
+		//	}
+	}
+
+	/* Save off the filters, so they can be restored after the call to BuildScan() */
+	fltrs := baseKeyspace.Filters()
+	joinfltrs := baseKeyspace.JoinFilters()
+	dnfPred := baseKeyspace.DnfPred()
+	origPred := baseKeyspace.OrigPred()
+	onclause := baseKeyspace.Onclause()
+
+	baseKeyspace.AddFilters(origJoinFilters)
+	err := CombineFilters(baseKeyspace, true, outer)
+	if err != nil {
+		return nil, nil, nil, nil, nil, OPT_COST_NOT_AVAIL, OPT_CARD_NOT_AVAIL, err
+	}
+
+	this.BuildScan(right)
+
+	rightPlanCopy := rightPlan.Copy()
+	rightPlanCopy.SetPlan(this.GetChildren())
+	rightPlanCopy.SetChildren(this.GetChildren())
+	rightPlanCopy.SetSubChildren(this.GetSubChildren())
+	rightPlanCopy.SetCoveringScans(this.GetCoveringScans())
+
+	// Restore the filters
+	baseKeyspace.SetFilters(fltrs, joinfltrs)
+	baseKeyspace.SetPreds(dnfPred, origPred, onclause)
+	/*
+		_, err = node.Accept(this)
+		if err != nil {
+			switch e := err.(type) {
+			case errors.Error:
+				if e.Code() == errors.NO_ANSI_JOIN &&
+					baseKeyspace.DnfPred() != nil && baseKeyspace.Onclause() != nil {
+	*/
+	// did not find an appropriate index path using both
+	// on clause and where clause filters, try using just
+	// the on clause filters
+	/*				baseKeyspace.SetOnclauseOnly()
+				_, err = node.Accept(this)
+			}
+		}
+
+		if err != nil {
+			return nil, nil, nil, nil, OPT_COST_NOT_AVAIL, OPT_CARD_NOT_AVAIL, err
+		}
+	}
+	*/
+	leftPlanCopy := leftPlan.Copy()
+	if len(rightPlanCopy.GetSubChildren()) > 0 {
+		rightPlanCopy.AddChildren(rightPlanCopy.AddSubchildrenParallel())
+	}
+
+	// temporarily mark index filters for selectivity calculation
+	err = markPlanFlagsChildren(right.Alias(), baseKeyspace.Filters(), rightPlanCopy.GetPlan())
+	if err != nil {
+		return nil, nil, nil, nil, nil, OPT_COST_NOT_AVAIL, OPT_CARD_NOT_AVAIL, err
+	}
+
+	// perform cover transformation for ON-clause
+	// this needs to be done here since we build plan.AnsiJoin or plan.AnsiNest
+	// by the caller right after returning from this function, and the plan
+	// operators gets onclause expression from algebra.AnsiJoin or algebra.AnsiNest,
+	// in case the entire ON-clause is transformed into a cover() expression
+	// (e.g., an ANY clause as the entire ON-clause), this transformation needs to
+	// be done before we build plan.AnsiJoin or plan.AnsiNest (since the root of
+	// the expression changes), otherwise the transformed onclause will not be in
+	// the plan operators.
+
+	var newFilter expression.Expression
+	if filter != nil {
+		newFilter = filter.Copy()
+	}
+
+	newOnclause := andedOnClause.Copy()
+
+	// do right-hand-side covering index scan first, in case an ANY clause contains
+	// a join filter, if part of the join filter gets transformed first, the ANY clause
+	// will no longer match during transformation.
+	// (note this assumes the ANY clause is on the right-hand-side keyspace)
+	//Change to rightPlanCopy
+	if len(rightPlanCopy.GetCoveringScans()) > 0 {
+		for _, op := range rightPlanCopy.GetCoveringScans() {
+			coverer := expression.NewCoverer(op.Covers(), op.FilterCovers())
+
+			if primaryJoinKeys != nil {
+				primaryJoinKeys, err = coverer.Map(primaryJoinKeys)
+				if err != nil {
+					return nil, nil, nil, nil, nil, OPT_COST_NOT_AVAIL, OPT_CARD_NOT_AVAIL, err
+				}
+			}
+			if newFilter != nil {
+				newFilter, err = coverer.Map(newFilter)
+				if err != nil {
+					return nil, nil, nil, nil, nil, OPT_COST_NOT_AVAIL, OPT_CARD_NOT_AVAIL, err
+				}
+			}
+			newOnclause, err = coverer.Map(newOnclause)
+			if err != nil {
+				return nil, nil, nil, nil, nil, OPT_COST_NOT_AVAIL, OPT_CARD_NOT_AVAIL, err
+			}
+		}
+	}
+
+	if len(leftPlan.GetCoveringScans()) > 0 {
+		for _, op := range leftPlan.GetCoveringScans() {
+			coverer := expression.NewCoverer(op.Covers(), op.FilterCovers())
+
+			if primaryJoinKeys != nil {
+				primaryJoinKeys, err = coverer.Map(primaryJoinKeys)
+				if err != nil {
+					return nil, nil, nil, nil, nil, OPT_COST_NOT_AVAIL, OPT_CARD_NOT_AVAIL, err
+				}
+			}
+			if newFilter != nil {
+				newFilter, err = coverer.Map(newFilter)
+				if err != nil {
+					return nil, nil, nil, nil, nil, OPT_COST_NOT_AVAIL, OPT_CARD_NOT_AVAIL, err
+				}
+			}
+			newOnclause, err = coverer.Map(newOnclause)
+			if err != nil {
+				return nil, nil, nil, nil, nil, OPT_COST_NOT_AVAIL, OPT_CARD_NOT_AVAIL, err
+			}
+
+			// also need to perform cover transformation for index spans for
+			// right-hand-side index scans since left-hand-side expressions
+			// could be used as part of index spans for right-hand-side index scan
+			for _, child := range rightPlanCopy.GetCoveringScans() {
+				if secondary, ok := child.(plan.SecondaryScan); ok {
+					err := secondary.CoverJoinSpanExpressions(coverer)
+					if err != nil {
+						return nil, nil, nil, nil, nil, OPT_COST_NOT_AVAIL, OPT_CARD_NOT_AVAIL, err
+					}
+				}
+			}
+		}
+	}
+
+	cost := float64(OPT_COST_NOT_AVAIL)
+	cardinality := float64(OPT_CARD_NOT_AVAIL)
+	useCBO := this.useCBO
+	if useCBO {
+		if len(rightPlanCopy.GetPlan()) > 0 {
+			cost, cardinality = getNLJoinCost2(leftPlanCopy.GetLastOp(), rightPlanCopy.GetLastOp(), joinCardinality, outer, op)
+		}
+	}
+	return rightPlanCopy, leftPlanCopy, primaryJoinKeys, newOnclause, newFilter, cost, cardinality, nil
+}
+
 func (this *builder) buildAnsiJoinSimpleFromTerm(node algebra.SimpleFromTerm, onclause expression.Expression) (
 	[]plan.Operator, expression.Expression, float64, float64, error) {
 

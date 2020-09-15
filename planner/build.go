@@ -77,10 +77,12 @@ const (
 const (
 	BUILDER_WHERE_IS_TRUE  = 1 << iota // WHERE clause is TRUE
 	BUILDER_WHERE_IS_FALSE             // WHERE clause is FALSE
+	BUILDER_PRIMARY_SCAN               // Build a primary index scan
+	BUILDER_SECONDARY_SCAN             // Build a secondary index scan
 )
 
 type builder struct {
-	indexPushDowns
+	IndexPushDowns
 	collectQueryInfo
 	context            *PrepareContext
 	datastore          datastore.Datastore
@@ -106,7 +108,8 @@ type builder struct {
 	orderScan          plan.SecondaryScan
 	baseKeyspaces      map[string]*base.BaseKeyspace
 	keyspaceNames      map[string]string
-	indexKeyspaceNames map[string]bool       // keyspace names that use indexscan (excludes non from caluse subqueries)
+	indexKeyspaceNames map[string]bool // keyspace names that use indexscan (excludes non from caluse subqueries)
+	simpleFromTerms    map[string]algebra.SimpleFromTerm
 	pushableOnclause   expression.Expression // combined ON-clause from all inner joins
 	builderFlags       uint32
 	indexAdvisor       bool
@@ -135,6 +138,7 @@ func (this *builder) Copy() *builder {
 		requirePrimaryKey: this.requirePrimaryKey,
 		baseKeyspaces:     base.CopyBaseKeyspacesWithFilters(this.baseKeyspaces),
 		keyspaceNames:     this.keyspaceNames,
+		simpleFromTerms:   this.simpleFromTerms,
 		pushableOnclause:  expression.Copy(this.pushableOnclause),
 		builderFlags:      this.builderFlags,
 		indexAdvisor:      this.indexAdvisor,
@@ -144,7 +148,7 @@ func (this *builder) Copy() *builder {
 		// children, subChildren, coveringScan, coveredUnnests, countScan, orderScan, lastOp
 	}
 
-	this.indexPushDowns.Copy(&rv.indexPushDowns)
+	this.IndexPushDowns.Copy(&rv.IndexPushDowns)
 
 	// no need to copy collectQueryInfo
 
@@ -161,13 +165,15 @@ type indexPushDowns struct {
 	aggs          algebra.Aggregates    // all aggregates in query
 	aggConstraint expression.Expression // aggregate Constraint
 }
+type IndexPushDowns indexPushDowns
 
-func (this *indexPushDowns) Copy(newIndexPushdowns *indexPushDowns) {
+func (this *IndexPushDowns) Copy(newIndexPushdowns *IndexPushDowns) {
 	newIndexPushdowns.order = this.order
 	newIndexPushdowns.limit = expression.Copy(this.limit)
 	newIndexPushdowns.offset = expression.Copy(this.offset)
 	newIndexPushdowns.oldAggregates = this.oldAggregates
 	newIndexPushdowns.projection = this.projection
+	newIndexPushdowns.group = this.group
 	newIndexPushdowns.aggs = this.aggs
 	newIndexPushdowns.aggConstraint = expression.Copy(this.aggConstraint)
 }

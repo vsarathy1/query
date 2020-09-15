@@ -28,6 +28,7 @@ type HashJoin struct {
 	hintError    string
 	filter       expression.Expression
 	cost         float64
+	cumCost      float64
 	cardinality  float64
 }
 
@@ -43,6 +44,23 @@ func NewHashJoin(join *algebra.AnsiJoin, child Operator, buildExprs, probeExprs 
 		hintError:    join.HintError(),
 		filter:       filter,
 		cost:         cost,
+		cardinality:  cardinality,
+	}
+}
+
+func NewHashJoinJE(child Operator, outer bool, onClause expression.Expression, buildExprs, probeExprs expression.Expressions,
+	buildAliases []string, filter expression.Expression, cost, cumCost, cardinality float64) *HashJoin {
+	return &HashJoin{
+		outer:        outer,
+		onclause:     onClause,
+		child:        child,
+		buildExprs:   buildExprs,
+		probeExprs:   probeExprs,
+		buildAliases: buildAliases,
+		hintError:    "",
+		filter:       filter,
+		cost:         cost,
+		cumCost:      cumCost,
 		cardinality:  cardinality,
 	}
 }
@@ -83,12 +101,20 @@ func (this *HashJoin) HintError() string {
 	return this.hintError
 }
 
+func (this *HashJoin) SetHintError(hintErr string) {
+	this.hintError = hintErr
+}
+
 func (this *HashJoin) Filter() expression.Expression {
 	return this.filter
 }
 
 func (this *HashJoin) Cost() float64 {
-	return this.cost
+	return this.cumCost // to maintain compatibility with current explain
+}
+
+func (this *HashJoin) CumCost() float64 {
+	return this.cumCost
 }
 
 func (this *HashJoin) Cardinality() float64 {

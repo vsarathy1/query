@@ -37,8 +37,9 @@ func (this *builder) visitFrom(node *algebra.Subselect, group *algebra.Group) er
 
 		// gather keyspace references
 		this.baseKeyspaces = make(map[string]*base.BaseKeyspace, _MAP_KEYSPACE_CAP)
+		this.simpleFromTerms = make(map[string]algebra.SimpleFromTerm, _MAP_KEYSPACE_CAP)
 		primaryTerm := this.from.PrimaryTerm()
-		keyspaceFinder := newKeyspaceFinder(this.baseKeyspaces, primaryTerm.Alias())
+		keyspaceFinder := newKeyspaceFinder(this.baseKeyspaces, this.simpleFromTerms, primaryTerm.Alias())
 		_, err := node.From().Accept(keyspaceFinder)
 		if err != nil {
 			return err
@@ -121,19 +122,27 @@ func (this *builder) visitFrom(node *algebra.Subselect, group *algebra.Group) er
 
 		this.extractKeyspacePredicates(this.where, nil)
 
-		var op plan.Operator
-
 		if this.useCBO && this.context.Optimizer() != nil {
 			optimizer := this.context.Optimizer()
 			optimizer.Initialize(this.Copy())
-			op, err = optimizer.OptimizeQueryBlock(node.From())
+			op, subchildren, cov, lastOp, err := optimizer.OptimizeQueryBlock(node.From())
 			if err != nil {
 				return err
 			}
-		}
+			if op != nil {
+				this.children = op
+				this.subChildren = subchildren
+				this.coveringScans = cov
+				this.lastOp = lastOp
+			}
 
-		if op != nil {
-			this.addChildren(op)
+			if op == nil && err == nil {
+				// Use FROM clause in index selection
+				_, err = node.From().Accept(this)
+				if err != nil {
+					return err
+				}
+			}
 		} else {
 			// Use FROM clause in index selection
 			_, err = node.From().Accept(this)
@@ -281,9 +290,14 @@ func (this *builder) VisitKeyspaceTerm(node *algebra.KeyspaceTerm) (interface{},
 		}
 	}
 
-	err = this.processKeyspaceDone(node.Alias())
-	if err != nil {
-		return nil, err
+	optimizer := this.context.Optimizer()
+	if this.useCBO && optimizer != nil && optimizer.UseNewOptimizer() == true {
+		// Do nothing
+	} else {
+		err = this.processKeyspaceDone(node.Alias())
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	return nil, nil

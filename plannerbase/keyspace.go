@@ -24,6 +24,7 @@ const (
 type BaseKeyspace struct {
 	name        string
 	keyspace    string
+	cardinality float64
 	filters     Filters
 	joinfilters Filters
 	dnfPred     expression.Expression
@@ -85,6 +86,14 @@ func (this *BaseKeyspace) IsPrimaryUnnest() bool {
 
 func (this *BaseKeyspace) SetPrimaryUnnest() {
 	this.ksFlags |= KS_PRIMARY_UNNEST
+}
+
+func (this *BaseKeyspace) GetCardinality() float64 {
+	return this.cardinality
+}
+
+func (this *BaseKeyspace) SetCardinality(card float64) {
+	this.cardinality = card
 }
 
 func CopyBaseKeyspaces(src map[string]*BaseKeyspace) map[string]*BaseKeyspace {

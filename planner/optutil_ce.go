@@ -107,6 +107,15 @@ func getHashJoinCost(left, right plan.Operator, buildExprs, probeExprs expressio
 	return OPT_COST_NOT_AVAIL, OPT_CARD_NOT_AVAIL, false
 }
 
+func getNLJoinCost2(left, right plan.Operator, joinCardinality float64, outer bool, op string) (float64, float64) {
+	return OPT_COST_NOT_AVAIL, OPT_CARD_NOT_AVAIL
+}
+
+func getHashJoinCost2(left, right plan.Operator, buildExprs, probeExprs expression.Expressions,
+	joinCardinality float64, buildRight, force bool, outer bool, op string) (float64, float64, bool) {
+	return OPT_COST_NOT_AVAIL, OPT_CARD_NOT_AVAIL, false
+}
+
 func getLookupJoinCost(left plan.Operator, outer bool, right *algebra.KeyspaceTerm,
 	rightKeyspace *base.BaseKeyspace) (float64, float64) {
 	return OPT_COST_NOT_AVAIL, OPT_CARD_NOT_AVAIL

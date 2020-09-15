@@ -199,6 +199,23 @@ func getHashJoinCost(left, right plan.Operator, buildExprs, probeExprs expressio
 		filters, outer, jointype)
 }
 
+func getNLJoinCost2(left, right plan.Operator, joinCardinality float64, outer bool, op string) (float64, float64) {
+	jointype := optutil.COST_JOIN
+	if op == "nest" {
+		jointype = optutil.COST_NEST
+	}
+	return optutil.CalcNLJoinCost2(left, right, joinCardinality, outer, jointype)
+}
+
+func getHashJoinCost2(left, right plan.Operator, buildExprs, probeExprs expression.Expressions,
+	joinCardinality float64, buildRight, force bool, outer bool, op string) (float64, float64, bool) {
+	jointype := optutil.COST_JOIN
+	if op == "nest" {
+		jointype = optutil.COST_NEST
+	}
+	return optutil.CalcHashJoinCost2(left, right, buildExprs, probeExprs, joinCardinality, buildRight, force, outer, jointype)
+}
+
 func getLookupJoinCost(left plan.Operator, outer bool, right *algebra.KeyspaceTerm,
 	rightKeyspace *base.BaseKeyspace) (float64, float64) {
 	return optutil.CalcLookupJoinNestCost(left, outer, right, rightKeyspace, optutil.COST_JOIN)
