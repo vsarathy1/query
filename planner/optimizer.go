@@ -13,6 +13,7 @@ package planner
 import (
 	"fmt"
 	"github.com/couchbase/query/algebra"
+	"github.com/couchbase/query/datastore"
 	"github.com/couchbase/query/errors"
 	"github.com/couchbase/query/expression"
 	"github.com/couchbase/query/plan"
@@ -64,6 +65,8 @@ type Builder interface {
 	SecondaryScan() bool
 	SetSecondaryScan()
 	UnsetSecondaryScan()
+	GetTermKeyspace(node *algebra.KeyspaceTerm) (datastore.Keyspace, error)
+	AllHints(keyspace datastore.Keyspace, hints algebra.IndexRefs, indexes []datastore.Index, indexApiVersion int, useFts bool) ([]datastore.Index, error)
 
 	BuildScan(node algebra.SimpleFromTerm) ([]plan.Operator, []plan.CoveringOperator, error)
 	BuildHashJoin(right algebra.SimpleFromTerm, onClause []expression.Expression, leftPlan IntermediatePlan, rightPlan IntermediatePlan, joinCardinality float64) (*plan.HashJoin, []plan.Operator, error)
@@ -72,6 +75,15 @@ type Builder interface {
 
 func (this *builder) GetBaseKeyspaces() map[string]*base.BaseKeyspace {
 	return this.baseKeyspaces
+}
+
+func (this *builder) GetTermKeyspace(node *algebra.KeyspaceTerm) (datastore.Keyspace, error) {
+	return this.getTermKeyspace(node)
+}
+
+func (this *builder) AllHints(keyspace datastore.Keyspace, hints algebra.IndexRefs, indexes []datastore.Index, indexApiVersion int, useFts bool) (
+	[]datastore.Index, error) {
+	return this.allHints(keyspace, hints, indexes, indexApiVersion, useFts)
 }
 
 func (this *builder) GetSimpleFromTerms() map[string]algebra.SimpleFromTerm {

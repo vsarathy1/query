@@ -73,7 +73,7 @@ func (this *builder) buildScan(keyspace datastore.Keyspace, node *algebra.Keyspa
 	if len(node.Indexes()) > 0 || this.context.UseFts() {
 		hints = _HINT_POOL.Get()
 		defer _HINT_POOL.Put(hints)
-		hints, err = allHints(keyspace, node.Indexes(), hints, this.context.IndexApiVersion(), this.context.UseFts())
+		hints, err = this.allHints(keyspace, node.Indexes(), hints, this.context.IndexApiVersion(), this.context.UseFts())
 		if err != nil {
 			return
 		}
@@ -622,7 +622,7 @@ func isValidIndex(idx datastore.Index, indexApiVersion int) bool {
 }
 
 // all HINT indexes
-func allHints(keyspace datastore.Keyspace, hints algebra.IndexRefs, indexes []datastore.Index, indexApiVersion int, useFts bool) (
+func (this *builder) allHints(keyspace datastore.Keyspace, hints algebra.IndexRefs, indexes []datastore.Index, indexApiVersion int, useFts bool) (
 	[]datastore.Index, error) {
 
 	// check if HINT has FTS index refrence
