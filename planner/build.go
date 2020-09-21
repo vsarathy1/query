@@ -150,6 +150,7 @@ func (this *builder) Copy() *builder {
 	}
 
 	this.IndexPushDowns.Copy(&rv.IndexPushDowns)
+	rv.collectQueryInfo = *this.copyCollectQueryInfo()
 
 	// no need to copy collectQueryInfo
 

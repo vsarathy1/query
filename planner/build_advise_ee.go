@@ -250,6 +250,13 @@ func (this *builder) appendQueryInfo(scan plan.Operator, keyspace datastore.Keys
 	}
 }
 
+func (this *builder) copyCollectQueryInfo() *collectQueryInfo {
+	info := &collectQueryInfo{}
+	info.queryInfo = this.queryInfo
+	info.advisePhase = this.advisePhase
+	return info
+}
+
 func (this *builder) storeCollectQueryInfo() *collectQueryInfo {
 	info := &collectQueryInfo{}
 	info.queryInfo = this.queryInfo

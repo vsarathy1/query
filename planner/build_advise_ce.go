@@ -59,6 +59,10 @@ func (this *builder) processadviseJF(alias string) {
 func (this *builder) extractLetGroupProjOrder(let expression.Bindings, group *algebra.Group, projection *algebra.Projection, order *algebra.Order, aggs algebra.Aggregates) {
 }
 
+func (this *builder) copyCollectQueryInfo() *collectQueryInfo {
+	return nil
+}
+
 func (this *builder) storeCollectQueryInfo() *collectQueryInfo {
 	return nil
 }
