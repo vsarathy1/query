@@ -24,7 +24,7 @@ import (
 type Optimizer interface {
 	Initialize(builder Builder)
 	OptimizeQueryBlock(node algebra.Node) ([]plan.Operator, []plan.Operator, []plan.CoveringOperator, plan.Operator, error)
-	UseNewOptimizer() bool
+	DoJoinEnumeration() bool
 }
 type IntermediatePlan interface {
 	GetPlan() []plan.Operator
@@ -49,7 +49,11 @@ type IntermediatePlan interface {
 }
 
 type Builder interface {
+	CopyBuilder() *builder
 	GetBaseKeyspaces() map[string]*base.BaseKeyspace
+	GetKeyspaceNames() map[string]string
+	GetTermKeyspace(node *algebra.KeyspaceTerm) (datastore.Keyspace, error)
+	AllHints(keyspace datastore.Keyspace, hints algebra.IndexRefs, indexes []datastore.Index, indexApiVersion int, useFts bool) ([]datastore.Index, error)
 	GetSimpleFromTerms() map[string]algebra.SimpleFromTerm
 	GetPrepareContext() *PrepareContext
 	GetChildren() []plan.Operator
@@ -58,23 +62,51 @@ type Builder interface {
 	GetCountScan() plan.CoveringOperator
 	GetOrderScan() plan.SecondaryScan
 	GetLastOp() plan.Operator
+	GetCover() expression.HasExpressions
+	GetWhere() expression.Expression
+	GetFilter() expression.Expression
+	GetCorrelated() bool
+    GetCoveredUnnests() map[*algebra.Unnest]bool
+	GetPushableOnclause() expression.Expression
+	GetBuilderFlags() uint32
+	GetMaxParallelism() int
 	GetIndexPushDowns() IndexPushDowns
+	SetCoveringScans(coveringScans []plan.CoveringOperator)
+	SetCover(cover expression.HasExpressions)
+    SetWhere(where expression.Expression)
+    SetFilter(filter expression.Expression)
+    SetCorrelated(correlated bool)
+    SetCoveredUnnests(coveredUnnests map[*algebra.Unnest]bool)
+    SetCountScan(countScan plan.CoveringOperator)
+	SetOrderScan(orderScan plan.SecondaryScan)
+	SetLastOp(lastOp plan.Operator)
+    SetBaseKeyspaces(basekeyspaces map[string]*base.BaseKeyspace)
+    SetKeyspaceNames(keyspaceNames map[string]string)
+    SetPushableOnclause(pushableOnclause expression.Expression)
+	SetBuilderFlags(builderFlags uint32)
+    SetMaxParallelism(maxParallelism int)
+    SetIndexPushDowns(idxPushDowns IndexPushDowns)
 	PrimaryScan() bool
 	SetPrimaryScan()
 	UnsetPrimaryScan()
 	SecondaryScan() bool
 	SetSecondaryScan()
 	UnsetSecondaryScan()
-	GetTermKeyspace(node *algebra.KeyspaceTerm) (datastore.Keyspace, error)
-	AllHints(keyspace datastore.Keyspace, hints algebra.IndexRefs, indexes []datastore.Index, indexApiVersion int, useFts bool) ([]datastore.Index, error)
 
 	BuildScan(node algebra.SimpleFromTerm) ([]plan.Operator, []plan.CoveringOperator, error)
 	BuildHashJoin(right algebra.SimpleFromTerm, onClause []expression.Expression, leftPlan IntermediatePlan, rightPlan IntermediatePlan, joinCardinality float64) (*plan.HashJoin, []plan.Operator, error)
 	BuildNLJoin(right algebra.SimpleFromTerm, onClause []expression.Expression, origJoinFilters base.Filters, leftPlan IntermediatePlan, rightPlan IntermediatePlan, joinCardinality float64) (*plan.NLJoin, *plan.Join, IntermediatePlan /*[]plan.Operator*/, error)
 }
 
+func (this *builder) CopyBuilder() *builder {
+	return this.Copy()
+}
 func (this *builder) GetBaseKeyspaces() map[string]*base.BaseKeyspace {
 	return this.baseKeyspaces
+}
+
+func (this *builder) GetKeyspaceNames() map[string]string {
+	return this.keyspaceNames
 }
 
 func (this *builder) GetTermKeyspace(node *algebra.KeyspaceTerm) (datastore.Keyspace, error) {
@@ -117,8 +149,101 @@ func (this *builder) GetOrderScan() plan.SecondaryScan {
 func (this *builder) GetLastOp() plan.Operator {
 	return this.lastOp
 }
+
+func (this *builder) GetCover() expression.HasExpressions {
+	return this.cover
+}
+
+func (this *builder) GetWhere() expression.Expression {
+	return this.where
+}
+
+func (this *builder) GetFilter() expression.Expression {
+	return this.filter
+}
+
+func (this *builder) GetCorrelated() bool {
+	return this.correlated
+}
+
+func (this *builder) GetCoveredUnnests() map[*algebra.Unnest]bool {
+	return this.coveredUnnests
+}
+
+func (this *builder) GetPushableOnclause() expression.Expression {
+	return this.pushableOnclause
+}
+
+func (this *builder) GetBuilderFlags() uint32 {
+	return this.builderFlags
+}
+
+func (this *builder) GetMaxParallelism() int {
+	return this.maxParallelism
+}
+
 func (this *builder) GetIndexPushDowns() IndexPushDowns {
 	return this.IndexPushDowns
+}
+
+func (this *builder) SetCoveringScans(coveringScans []plan.CoveringOperator) {
+	this.coveringScans = coveringScans
+}
+
+func (this *builder) SetCover(cover expression.HasExpressions) {
+	this.cover = cover
+}
+
+func (this *builder) SetWhere(where expression.Expression) {
+	this.where = where
+}
+
+func (this *builder) SetFilter(filter expression.Expression) {
+	this.filter = filter
+}
+
+func (this *builder) SetCorrelated(correlated bool) {
+	this.correlated = correlated
+}
+
+func (this *builder) SetCoveredUnnests(coveredUnnests map[*algebra.Unnest]bool) {
+	this.coveredUnnests = coveredUnnests
+}
+
+func (this *builder) SetCountScan(countScan plan.CoveringOperator) {
+	this.countScan = countScan
+}
+
+func (this *builder) SetOrderScan(orderScan plan.SecondaryScan) {
+	this.orderScan = orderScan
+}
+
+func (this *builder) SetLastOp(lastOp plan.Operator) {
+	this.lastOp = lastOp
+}
+
+func (this *builder) SetBaseKeyspaces(basekeyspaces map[string]*base.BaseKeyspace) {
+	this.baseKeyspaces = basekeyspaces
+}
+
+func (this *builder) SetKeyspaceNames(keyspaceNames map[string]string) {
+	this.keyspaceNames = keyspaceNames
+}
+
+func (this *builder) SetPushableOnclause(pushableOnclause expression.Expression) {
+	this.pushableOnclause = pushableOnclause
+}
+
+func (this *builder) SetBuilderFlags(builderFlags uint32) {
+	this.builderFlags = builderFlags
+}
+
+func (this *builder) SetMaxParallelism(maxParallelism int) {
+	this.maxParallelism = maxParallelism
+}
+
+func (this *builder) SetIndexPushDowns(idxPushDowns IndexPushDowns) {
+	this.IndexPushDowns = idxPushDowns
 }
 
 func (this *builder) PrimaryScan() bool {

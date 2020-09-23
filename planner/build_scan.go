@@ -64,7 +64,7 @@ func (this *builder) buildScan(keyspace datastore.Keyspace, node *algebra.Keyspa
 	join := node.IsAnsiJoinOp()
 	hash := node.IsUnderHash()
 	optimizer := this.context.Optimizer()
-	if this.useCBO && optimizer != nil && optimizer.UseNewOptimizer() == true {
+	if this.useCBO && optimizer != nil && optimizer.DoJoinEnumeration() == true {
 		join = false
 		hash = false
 	}
@@ -173,7 +173,7 @@ func (this *builder) buildPredicateScan(keyspace datastore.Keyspace, node *algeb
 	nlj := node.IsUnderNL()
 	prjoin := node.IsPrimaryJoin()
 	optimizer := this.context.Optimizer()
-	if this.useCBO && optimizer != nil && optimizer.UseNewOptimizer() == true {
+	if this.useCBO && optimizer != nil && optimizer.DoJoinEnumeration() == true {
 		join = false
 		hash = false
 		nlj = false
@@ -260,7 +260,7 @@ func (this *builder) buildSubsetScan(keyspace datastore.Keyspace, node *algebra.
 	join := node.IsAnsiJoinOp()
 	hash := node.IsUnderHash()
 	optimizer := this.context.Optimizer()
-	if this.useCBO && optimizer != nil && optimizer.UseNewOptimizer() == true {
+	if this.useCBO && optimizer != nil && optimizer.DoJoinEnumeration() == true {
 		join = false
 		hash = false
 	}
@@ -314,7 +314,7 @@ func (this *builder) buildTermScan(node *algebra.KeyspaceTerm,
 	join := node.IsAnsiJoinOp()
 	nlj := node.IsUnderNL()
 	optimizer := this.context.Optimizer()
-	if this.useCBO && optimizer != nil && optimizer.UseNewOptimizer() == true {
+	if this.useCBO && optimizer != nil && optimizer.DoJoinEnumeration() == true {
 		join = false
 		nlj = false
 	}

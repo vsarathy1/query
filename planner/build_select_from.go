@@ -291,7 +291,7 @@ func (this *builder) VisitKeyspaceTerm(node *algebra.KeyspaceTerm) (interface{},
 	}
 
 	optimizer := this.context.Optimizer()
-	if this.useCBO && optimizer != nil && optimizer.UseNewOptimizer() == true {
+	if this.useCBO && optimizer != nil && optimizer.DoJoinEnumeration() == true {
 		// Do nothing
 	} else {
 		err = this.processKeyspaceDone(node.Alias())
