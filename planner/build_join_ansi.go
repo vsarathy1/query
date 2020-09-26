@@ -1237,6 +1237,7 @@ func (this *builder) constructNLJoin(right algebra.SimpleFromTerm, onClause []ex
 	rightPlanCopy.SetChildren(this.GetChildren())
 	rightPlanCopy.SetSubChildren(this.GetSubChildren())
 	rightPlanCopy.SetCoveringScans(this.GetCoveringScans())
+	rightPlanCopy.SetLastOp(this.GetLastOp())
 
 	// Restore the filters
 	baseKeyspace.SetFilters(fltrs, joinfltrs)

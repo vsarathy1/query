@@ -38,6 +38,7 @@ type IntermediatePlan interface {
 	GetCountScan() plan.CoveringOperator
 	GetOrderScan() plan.SecondaryScan
 	GetLastOp() plan.Operator
+	SetLastOp(plan.Operator)
 	GetIndexPushDowns() IndexPushDowns
 	AddChildren(ops ...plan.Operator)
 	AddSubchildrenParallel() *plan.Parallel
@@ -66,26 +67,26 @@ type Builder interface {
 	GetWhere() expression.Expression
 	GetFilter() expression.Expression
 	GetCorrelated() bool
-    GetCoveredUnnests() map[*algebra.Unnest]bool
+	GetCoveredUnnests() map[*algebra.Unnest]bool
 	GetPushableOnclause() expression.Expression
 	GetBuilderFlags() uint32
 	GetMaxParallelism() int
 	GetIndexPushDowns() IndexPushDowns
 	SetCoveringScans(coveringScans []plan.CoveringOperator)
 	SetCover(cover expression.HasExpressions)
-    SetWhere(where expression.Expression)
-    SetFilter(filter expression.Expression)
-    SetCorrelated(correlated bool)
-    SetCoveredUnnests(coveredUnnests map[*algebra.Unnest]bool)
-    SetCountScan(countScan plan.CoveringOperator)
+	SetWhere(where expression.Expression)
+	SetFilter(filter expression.Expression)
+	SetCorrelated(correlated bool)
+	SetCoveredUnnests(coveredUnnests map[*algebra.Unnest]bool)
+	SetCountScan(countScan plan.CoveringOperator)
 	SetOrderScan(orderScan plan.SecondaryScan)
 	SetLastOp(lastOp plan.Operator)
-    SetBaseKeyspaces(basekeyspaces map[string]*base.BaseKeyspace)
-    SetKeyspaceNames(keyspaceNames map[string]string)
-    SetPushableOnclause(pushableOnclause expression.Expression)
+	SetBaseKeyspaces(basekeyspaces map[string]*base.BaseKeyspace)
+	SetKeyspaceNames(keyspaceNames map[string]string)
+	SetPushableOnclause(pushableOnclause expression.Expression)
 	SetBuilderFlags(builderFlags uint32)
-    SetMaxParallelism(maxParallelism int)
-    SetIndexPushDowns(idxPushDowns IndexPushDowns)
+	SetMaxParallelism(maxParallelism int)
+	SetIndexPushDowns(idxPushDowns IndexPushDowns)
 	PrimaryScan() bool
 	SetPrimaryScan()
 	UnsetPrimaryScan()
