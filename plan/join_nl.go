@@ -40,6 +40,7 @@ func NewNLJoin(join *algebra.AnsiJoin, child Operator, filter expression.Express
 		child:       child,
 		filter:      filter,
 		cost:        cost,
+		cumCost:     0,
 		cardinality: cardinality,
 	}
 }
@@ -96,7 +97,11 @@ func (this *NLJoin) Filter() expression.Expression {
 }
 
 func (this *NLJoin) Cost() float64 {
-	return this.cumCost // to maintain compatibility with current explain
+	if this.cumCost > 0 {
+		return this.cumCost // to maintain compatibility between new join enum code and current explain
+	} else {
+		return this.cost
+	}
 }
 
 func (this *NLJoin) CumCost() float64 {

@@ -121,6 +121,11 @@ func getLookupJoinCost(left plan.Operator, outer bool, right *algebra.KeyspaceTe
 	return OPT_COST_NOT_AVAIL, OPT_CARD_NOT_AVAIL
 }
 
+func getLookupJoinCost2(left plan.Operator, outer bool, right *algebra.KeyspaceTerm,
+	rightKeyspace *base.BaseKeyspace) (float64, float64) {
+	return OPT_COST_NOT_AVAIL, OPT_CARD_NOT_AVAIL
+}
+
 func getIndexJoinCost(left plan.Operator, outer bool, right *algebra.KeyspaceTerm,
 	rightKeyspace *base.BaseKeyspace, covered bool, index datastore.Index,
 	requestId string, advisorValidate bool) (float64, float64) {
@@ -142,6 +147,10 @@ func getUnnestCost(node *algebra.Unnest, lastOp plan.Operator, keyspaces map[str
 }
 
 func getSimpleFromTermCost(left, right plan.Operator, filters base.Filters) (float64, float64) {
+	return OPT_COST_NOT_AVAIL, OPT_CARD_NOT_AVAIL
+}
+
+func getSimpleFromTermCost2(left, right plan.Operator, joinCardinality float64, filters base.Filters) (float64, float64) {
 	return OPT_COST_NOT_AVAIL, OPT_CARD_NOT_AVAIL
 }
 

@@ -11,7 +11,6 @@ package plan
 
 import (
 	"encoding/json"
-
 	"github.com/couchbase/query/algebra"
 	"github.com/couchbase/query/expression"
 	"github.com/couchbase/query/expression/parser"
@@ -44,6 +43,7 @@ func NewHashJoin(join *algebra.AnsiJoin, child Operator, buildExprs, probeExprs 
 		hintError:    join.HintError(),
 		filter:       filter,
 		cost:         cost,
+		cumCost:      0,
 		cardinality:  cardinality,
 	}
 }
@@ -110,7 +110,11 @@ func (this *HashJoin) Filter() expression.Expression {
 }
 
 func (this *HashJoin) Cost() float64 {
-	return this.cumCost // to maintain compatibility with current explain
+	if this.cumCost > 0 {
+		return this.cumCost // to maintain compatibility between new join enum code and current explain
+	} else {
+		return this.cost
+	}
 }
 
 func (this *HashJoin) CumCost() float64 {

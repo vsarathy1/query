@@ -96,7 +96,7 @@ type Builder interface {
 
 	BuildScan(node algebra.SimpleFromTerm) ([]plan.Operator, []plan.CoveringOperator, error)
 	BuildHashJoin(right algebra.SimpleFromTerm, onClause []expression.Expression, leftPlan IntermediatePlan, rightPlan IntermediatePlan, joinCardinality float64) (*plan.HashJoin, []plan.Operator, error)
-	BuildNLJoin(right algebra.SimpleFromTerm, onClause []expression.Expression, origJoinFilters base.Filters, leftPlan IntermediatePlan, rightPlan IntermediatePlan, joinCardinality float64) (*plan.NLJoin, *plan.Join, IntermediatePlan /*[]plan.Operator*/, error)
+	BuildJoin(right algebra.SimpleFromTerm, onClause []expression.Expression, origJoinFilters base.Filters, leftPlan IntermediatePlan, rightPlan IntermediatePlan, joinCardinality float64) (*plan.NLJoin, *plan.Join, IntermediatePlan, error)
 }
 
 func (this *builder) CopyBuilder() *builder {
@@ -408,7 +408,7 @@ func (this *builder) BuildHashJoin(right algebra.SimpleFromTerm, onClause []expr
 	return nil, nil, nil
 }
 
-func (this *builder) BuildNLJoin(right algebra.SimpleFromTerm, onClause []expression.Expression, origJoinFilters base.Filters, leftPlan IntermediatePlan, rightPlan IntermediatePlan, joinCardinality float64) (nljoin *plan.NLJoin, join *plan.Join, probePlan IntermediatePlan /*[]plan.Operator*/, err error) {
+func (this *builder) BuildJoin(right algebra.SimpleFromTerm, onClause []expression.Expression, origJoinFilters base.Filters, leftPlan IntermediatePlan, rightPlan IntermediatePlan, joinCardinality float64) (nljoin *plan.NLJoin, lookupjoin *plan.Join, probePlan IntermediatePlan, err error) {
 
 	if onClause == nil {
 		return nil, nil, nil, nil
@@ -468,8 +468,7 @@ func (this *builder) BuildNLJoin(right algebra.SimpleFromTerm, onClause []expres
 
 		origOnclause := andedOnClause
 		right.SetUnderNL()
-		scans, probePlan, primaryJoinKeys, newOnclause, newFilter, cost, cardinality, err := this.constructNLJoin(right, onClause, andedOnClause, origJoinFilters, leftPlan, rightPlan, filter, joinCardinality, false /*outerflag is set to false for now */, "join")
-		cumCost := leftPlan.GetCumCost() + cost
+		scans, probePlan, primaryJoinKeys, newOnclause, newFilter, cost, cardinality, err := this.constructJoin(right, onClause, andedOnClause, origJoinFilters, leftPlan, rightPlan, filter, joinCardinality, false /*outerflag is set to false for now */, "join")
 		if err != nil { // && !useCBO {
 			// in case of CBO, defer returning error in case hash join is feasible
 			return nil, nil, nil, err
@@ -483,6 +482,7 @@ func (this *builder) BuildNLJoin(right algebra.SimpleFromTerm, onClause []expres
 				selec = this.adjustForIndexFilters(right.Alias(), origOnclause, selec)
 				cost, cardinality = getSimpleFilterCost(cost, cardinality, selec)
 			}
+			cumCost := leftPlan.GetCumCost() + cost
 			return plan.NewNLJoinJE(plan.NewSequence(scans.GetPlan()...), false /*for now */, newOnclause, right.Alias(), newFilter, cost, cumCost, joinCardinality), nil, probePlan /*.GetPlan()*/, nil
 		} else if err != nil { //&& useCBO {
 			// error occurred and neither nested-loop join nor hash join is available
@@ -519,23 +519,23 @@ func (this *builder) BuildNLJoin(right algebra.SimpleFromTerm, onClause []expres
 		cost = OPT_COST_NOT_AVAIL
 		cardinality = OPT_CARD_NOT_AVAIL
 		if this.useCBO {
-			cost, cardinality = getLookupJoinCost(rightPlan.GetLastOp(), false, /*node.Outer(), */
+			cost, cardinality = getLookupJoinCost2(rightPlan.GetLastOp(), false, /*node.Outer(), */
 				newKeyspaceTerm, this.baseKeyspaces[right.Alias()])
 		}
-		return nil, plan.NewJoinFromAnsi(keyspace, newKeyspaceTerm, false /*node.Outer(), */, cost, cardinality), nil, nil
+		cumCost := leftPlan.GetCumCost() + cost
+		return nil, plan.NewJoinFromAnsiJE(keyspace, newKeyspaceTerm, false /*node.Outer(), */, cost, cumCost, cardinality), probePlan, nil
 	case *algebra.ExpressionTerm, *algebra.SubqueryTerm:
 		//		err := this.processOnclause(right.Alias(), andedOnClause, node.Outer(), node.Pushable())
 		//		if err != nil {
 		//			return nil, err
 		//		}
 
-		// NOT HANDLED IN THE JOIN ENUMERATION CODE YET
 		filter, selec, err := this.getFilter(right.Alias(), andedOnClause)
 		if err != nil {
 			return nil, nil, nil, err
 		}
 
-		scans, newOnclause, cost, cardinality, err := this.buildAnsiJoinSimpleFromTerm(right, andedOnClause)
+		scans, probePlan, newOnclause, cost, cardinality, err := this.constructAnsiJoinSimpleFromTerm(right, leftPlan, rightPlan, joinCardinality, andedOnClause)
 		if err != nil {
 			return nil, nil, nil, err
 		}
@@ -547,10 +547,9 @@ func (this *builder) BuildNLJoin(right algebra.SimpleFromTerm, onClause []expres
 		if useCBO && (cost > 0.0) && (cardinality > 0.0) && (selec > 0.0) && (filter != nil) {
 			cost, cardinality = getSimpleFilterCost(cost, cardinality, selec)
 		}
-
-		return plan.NewNLJoinJE(plan.NewSequence(scans...), false /*for now */, newOnclause, right.Alias(), filter, cost, cost, joinCardinality), nil, nil, nil
+		cumCost := leftPlan.GetCumCost() + cost
+		return plan.NewNLJoinJE(plan.NewSequence(scans.GetPlan()...), false /*for now */, newOnclause, right.Alias(), filter, cost, cumCost, joinCardinality), nil, probePlan, nil
 	default:
 		return nil, nil, nil, errors.NewPlanInternalError(fmt.Sprintf("buildAnsiJoin: Unexpected right-hand side node type"))
 	}
-
 }

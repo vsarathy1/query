@@ -1184,7 +1184,7 @@ func (this *builder) constructHashJoin(right algebra.SimpleFromTerm, onClause []
 	return plan.NewHashJoinJE(child, false, newOnclause, buildExprs, probeExprs, buildAliases, newFilter, cost, cumCost, joinCardinality), probePlan, nil
 }
 
-func (this *builder) constructNLJoin(right algebra.SimpleFromTerm, onClause []expression.Expression, andedOnClause expression.Expression, origJoinFilters base.Filters, leftPlan IntermediatePlan, rightPlan IntermediatePlan, filter expression.Expression, joinCardinality float64, outer bool, op string) (
+func (this *builder) constructJoin(right algebra.SimpleFromTerm, onClause []expression.Expression, andedOnClause expression.Expression, origJoinFilters base.Filters, leftPlan IntermediatePlan, rightPlan IntermediatePlan, filter expression.Expression, joinCardinality float64, outer bool, op string) (
 	IntermediatePlan, IntermediatePlan /*[]plan.Operator, []plan.Operator, */, expression.Expression, expression.Expression, expression.Expression, float64, float64, error) {
 
 	baseKeyspace, _ := this.baseKeyspaces[right.Alias()]
@@ -1230,7 +1230,24 @@ func (this *builder) constructNLJoin(right algebra.SimpleFromTerm, onClause []ex
 		return nil, nil, nil, nil, nil, OPT_COST_NOT_AVAIL, OPT_CARD_NOT_AVAIL, err
 	}
 
-	this.BuildScan(right)
+	_, _, err = this.BuildScan(right)
+	if err != nil {
+		switch e := err.(type) {
+		case errors.Error:
+			if e.Code() == errors.NO_ANSI_JOIN &&
+				baseKeyspace.DnfPred() != nil && baseKeyspace.Onclause() != nil {
+
+				// did not find an appropriate index path using both
+				// on clause and where clause filters, try using just
+				// the on clause filters
+				baseKeyspace.SetOnclauseOnly()
+				_, _, err = this.BuildScan(right)
+			}
+		}
+		if err != nil {
+			return nil, nil, nil, nil, nil, OPT_COST_NOT_AVAIL, OPT_CARD_NOT_AVAIL, err
+		}
+	}
 
 	rightPlanCopy := rightPlan.Copy()
 	rightPlanCopy.SetPlan(this.GetChildren())
@@ -1242,27 +1259,7 @@ func (this *builder) constructNLJoin(right algebra.SimpleFromTerm, onClause []ex
 	// Restore the filters
 	baseKeyspace.SetFilters(fltrs, joinfltrs)
 	baseKeyspace.SetPreds(dnfPred, origPred, onclause)
-	/*
-		_, err = node.Accept(this)
-		if err != nil {
-			switch e := err.(type) {
-			case errors.Error:
-				if e.Code() == errors.NO_ANSI_JOIN &&
-					baseKeyspace.DnfPred() != nil && baseKeyspace.Onclause() != nil {
-	*/
-	// did not find an appropriate index path using both
-	// on clause and where clause filters, try using just
-	// the on clause filters
-	/*				baseKeyspace.SetOnclauseOnly()
-				_, err = node.Accept(this)
-			}
-		}
 
-		if err != nil {
-			return nil, nil, nil, nil, OPT_COST_NOT_AVAIL, OPT_CARD_NOT_AVAIL, err
-		}
-	}
-	*/
 	leftPlanCopy := leftPlan.Copy()
 	if len(rightPlanCopy.GetSubChildren()) > 0 {
 		rightPlanCopy.AddChildren(rightPlanCopy.AddSubchildrenParallel())
@@ -1444,6 +1441,86 @@ func (this *builder) buildAnsiJoinSimpleFromTerm(node algebra.SimpleFromTerm, on
 	}
 
 	return this.children, newOnclause, cost, cardinality, nil
+}
+
+func (this *builder) constructAnsiJoinSimpleFromTerm(node algebra.SimpleFromTerm, leftPlan IntermediatePlan, rightPlan IntermediatePlan, joinCardinality float64, onclause expression.Expression) (
+	IntermediatePlan, IntermediatePlan /*[]plan.Operator, []plan.Operator, */, expression.Expression, float64, float64, error) {
+
+	var newOnclause expression.Expression
+	var err error
+
+	baseKeyspace, _ := this.baseKeyspaces[node.Alias()]
+	filters := baseKeyspace.Filters()
+	if len(filters) > 0 {
+		filters.ClearIndexFlag()
+	}
+
+	// perform covering transformation
+	if len(leftPlan.GetCoveringScans()) > 0 {
+		var exprTerm *algebra.ExpressionTerm
+		var fromExpr expression.Expression
+
+		if term, ok := node.(*algebra.ExpressionTerm); ok {
+			exprTerm = term
+			if exprTerm.IsCorrelated() {
+				fromExpr = exprTerm.ExpressionTerm().Copy()
+			}
+		}
+
+		newOnclause = onclause.Copy()
+
+		for _, op := range leftPlan.GetCoveringScans() {
+			coverer := expression.NewCoverer(op.Covers(), op.FilterCovers())
+
+			newOnclause, err = coverer.Map(newOnclause)
+			if err != nil {
+				return nil, nil, nil, OPT_COST_NOT_AVAIL, OPT_CARD_NOT_AVAIL, err
+			}
+
+			if fromExpr != nil {
+				fromExpr, err = coverer.Map(fromExpr)
+				if err != nil {
+					return nil, nil, nil, OPT_COST_NOT_AVAIL, OPT_CARD_NOT_AVAIL, err
+				}
+			}
+		}
+
+		if exprTerm != nil && fromExpr != nil {
+			exprTerm.SetExpressionTerm(fromExpr)
+		}
+	}
+
+	// new slices of this.children and this.subChildren are made in function
+	// VisitSubqueryTerm() or VisitExpressionTerm()
+	this.children = nil
+	this.subChildren = nil
+	this.lastOp = nil
+
+	_, _, err = this.BuildScan(node)
+	if err != nil {
+		return nil, nil, nil, OPT_COST_NOT_AVAIL, OPT_CARD_NOT_AVAIL, err
+	}
+
+	rightPlanCopy := rightPlan.Copy()
+	rightPlanCopy.SetPlan(this.GetChildren())
+	rightPlanCopy.SetChildren(this.GetChildren())
+	rightPlanCopy.SetSubChildren(this.GetSubChildren())
+	rightPlanCopy.SetCoveringScans(this.GetCoveringScans())
+	rightPlanCopy.SetLastOp(this.GetLastOp())
+
+	if len(rightPlanCopy.GetSubChildren()) > 0 {
+		rightPlanCopy.AddChildren(rightPlanCopy.AddSubchildrenParallel())
+	}
+
+	cost := OPT_COST_NOT_AVAIL
+	cardinality := OPT_CARD_NOT_AVAIL
+
+	if this.useCBO {
+		cost, cardinality = getSimpleFromTermCost2(leftPlan.GetLastOp(), rightPlan.GetLastOp(), joinCardinality, filters)
+	}
+
+	leftPlanCopy := leftPlan.Copy()
+	return rightPlanCopy, leftPlanCopy, newOnclause, cost, cardinality, nil
 }
 
 func (this *builder) markPlanFlags(op plan.Operator, term algebra.SimpleFromTerm) error {

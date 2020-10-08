@@ -24,6 +24,7 @@ type Join struct {
 	term        *algebra.KeyspaceTerm
 	outer       bool
 	cost        float64
+	cumCost     float64
 	cardinality float64
 }
 
@@ -43,6 +44,18 @@ func NewJoinFromAnsi(keyspace datastore.Keyspace, term *algebra.KeyspaceTerm, ou
 		term:        term,
 		outer:       outer,
 		cost:        cost,
+		cumCost:     0,
+		cardinality: cardinality,
+	}
+}
+
+func NewJoinFromAnsiJE(keyspace datastore.Keyspace, term *algebra.KeyspaceTerm, outer bool, cost, cumCost, cardinality float64) *Join {
+	return &Join{
+		keyspace:    keyspace,
+		term:        term,
+		outer:       outer,
+		cost:        cost,
+		cumCost:     cumCost,
 		cardinality: cardinality,
 	}
 }
@@ -68,9 +81,16 @@ func (this *Join) Outer() bool {
 }
 
 func (this *Join) Cost() float64 {
-	return this.cost
+	if this.cumCost > 0 {
+		return this.cumCost // to maintain compatibility between new join enum code and current explain
+	} else {
+		return this.cost
+	}
 }
 
+func (this *Join) CumCost() float64 {
+	return this.cumCost
+}
 func (this *Join) Cardinality() float64 {
 	return this.cardinality
 }
