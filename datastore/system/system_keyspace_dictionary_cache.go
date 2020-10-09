@@ -68,8 +68,6 @@ func (b *dictionaryCacheKeyspace) Indexers() ([]datastore.Indexer, errors.Error)
 func (b *dictionaryCacheKeyspace) Fetch(keys []string, keysMap map[string]value.AnnotatedValue,
 	context datastore.QueryContext, subPaths []string) (errs []errors.Error) {
 
-	creds, authToken := credsFromContext(context)
-
 	// now that the node name can change in flight, use a consistent one across fetches
 	whoAmI := distributed.RemoteAccess().WhoAmI()
 	for _, key := range keys {
@@ -95,17 +93,15 @@ func (b *dictionaryCacheKeyspace) Fetch(keys []string, keysMap map[string]value.
 					}
 					remoteValue := value.NewAnnotatedValue(doc)
 					remoteValue.SetField("node", node)
-					remoteValue.SetAttachment("meta", map[string]interface{}{
-						"id":            key,
-						"keyspace":      b.fullName,
-						"distributions": distributions,
-					})
+					meta := remoteValue.NewMeta()
+					meta["keyspace"] = b.fullName
+					meta["distributions"] = distributions
 					remoteValue.SetId(key)
 					keysMap[key] = remoteValue
 				},
 				func(warn errors.Error) {
 					context.Warning(warn)
-				}, creds, authToken)
+				}, distributed.NO_CREDS, "")
 		} else {
 
 			// local entry
@@ -127,11 +123,9 @@ func (b *dictionaryCacheKeyspace) Fetch(keys []string, keysMap map[string]value.
 					}
 				}
 				item := value.NewAnnotatedValue(itemMap)
-				item.SetAttachment("meta", map[string]interface{}{
-					"id":            key,
-					"keyspace":      b.fullName,
-					"distributions": distributions,
-				})
+				meta := item.NewMeta()
+				meta["keyspace"] = b.fullName
+				meta["distributions"] = distributions
 				item.SetId(key)
 				keysMap[key] = item
 			})
@@ -156,7 +150,6 @@ func (b *dictionaryCacheKeyspace) Upsert(upserts []value.Pair, context datastore
 }
 
 func (b *dictionaryCacheKeyspace) Delete(deletes []value.Pair, context datastore.QueryContext) ([]value.Pair, errors.Error) {
-	creds, authToken := credsFromContext(context)
 
 	// now that the node name can change in flight, use a consistent one across deletes
 	whoAmI := distributed.RemoteAccess().WhoAmI()
@@ -172,7 +165,7 @@ func (b *dictionaryCacheKeyspace) Delete(deletes []value.Pair, context datastore
 				func(warn errors.Error) {
 					context.Warning(warn)
 				},
-				creds, authToken)
+				distributed.NO_CREDS, "")
 
 		} else {
 			// local entry

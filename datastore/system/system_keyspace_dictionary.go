@@ -87,11 +87,9 @@ func (b *dictionaryKeyspace) Fetch(keys []string, keysMap map[string]value.Annot
 				}
 			}
 			item = value.NewAnnotatedValue(value.NewValue(itemMap))
-			item.SetAttachment("meta", map[string]interface{}{
-				"id":            k,
-				"keyspace":      b.fullName,
-				"distributions": distributions,
-			})
+			meta := item.NewMeta()
+			meta["keyspace"] = b.fullName
+			meta["distributions"] = distributions
 			item.SetId(k)
 		}
 		keysMap[k] = item
@@ -132,8 +130,6 @@ func (b *dictionaryKeyspace) Upsert(upserts []value.Pair, context datastore.Quer
 }
 
 func (b *dictionaryKeyspace) Delete(deletes []value.Pair, context datastore.QueryContext) ([]value.Pair, errors.Error) {
-	creds, authToken := credsFromContext(context)
-
 	for _, pair := range deletes {
 		name := pair.Name
 
@@ -143,7 +139,7 @@ func (b *dictionaryKeyspace) Delete(deletes []value.Pair, context datastore.Quer
 			func(warn errors.Error) {
 				context.Warning(warn)
 			},
-			creds, authToken)
+			distributed.NO_CREDS, "")
 
 		dictionary.DropDictionaryEntry(name)
 	}

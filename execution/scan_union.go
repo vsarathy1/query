@@ -122,7 +122,7 @@ func (this *UnionScan) RunOnce(context *Context, parent value.Value) {
 
 				// stop children, wait and clean up
 				if n > 0 {
-					notifyChildren(this.scans...)
+					sendChildren(this.plan, this.scans...)
 					this.childrenWaitNoStop(n)
 					this.channel.close(context)
 				}
@@ -199,12 +199,13 @@ func (this *UnionScan) reopen(context *Context) bool {
 
 func (this *UnionScan) Done() {
 	this.baseDone()
-	for s, scan := range this.scans {
-		this.scans[s] = nil
+	scans := this.scans
+	this.scans = nil
+	for s, scan := range scans {
+		scans[s] = nil
 		scan.Done()
 	}
-	_INDEX_SCAN_POOL.Put(this.scans)
-	this.scans = nil
+	_INDEX_SCAN_POOL.Put(scans)
 	channel := this.channel
 	this.channel = nil
 	if channel != nil {

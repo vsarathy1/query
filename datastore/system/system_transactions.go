@@ -68,8 +68,6 @@ func (b *transactionsKeyspace) Indexers() ([]datastore.Indexer, errors.Error) {
 func (b *transactionsKeyspace) Fetch(keys []string, keysMap map[string]value.AnnotatedValue,
 	context datastore.QueryContext, subPaths []string) (errs []errors.Error) {
 
-	creds, authToken := credsFromContext(context)
-
 	// now that the node name can change in flight, use a consistent one across fetches
 	whoAmI := distributed.RemoteAccess().WhoAmI()
 	for _, key := range keys {
@@ -80,19 +78,15 @@ func (b *transactionsKeyspace) Fetch(keys []string, keysMap map[string]value.Ann
 			distributed.RemoteAccess().GetRemoteDoc(node, localKey,
 				"transactions", "POST",
 				func(doc map[string]interface{}) {
-					m := map[string]interface{}{
-						"id":       key,
-						"keyspace": b.fullName,
-					}
 					remoteValue := value.NewAnnotatedValue(doc)
+					remoteValue.NewMeta()["keyspace"] = b.fullName
 					remoteValue.SetField("node", node)
-					remoteValue.SetAttachment("meta", m)
 					remoteValue.SetId(key)
 					keysMap[key] = remoteValue
 				},
 				func(warn errors.Error) {
 					context.Warning(warn)
-				}, creds, authToken)
+				}, distributed.NO_CREDS, "")
 		} else {
 
 			// local entry
@@ -104,10 +98,7 @@ func (b *transactionsKeyspace) Fetch(keys []string, keysMap map[string]value.Ann
 					itemMap["node"] = node
 				}
 				item := value.NewAnnotatedValue(itemMap)
-				item.SetAttachment("meta", map[string]interface{}{
-					"id":       key,
-					"keyspace": b.fullName,
-				})
+				item.NewMeta()["keyspace"] = b.fullName
 				item.SetId(key)
 				keysMap[key] = item
 			})
@@ -134,8 +125,6 @@ func (b *transactionsKeyspace) Upsert(upserts []value.Pair, context datastore.Qu
 func (b *transactionsKeyspace) Delete(deletes []value.Pair, context datastore.QueryContext) ([]value.Pair, errors.Error) {
 	var err errors.Error
 
-	creds, authToken := credsFromContext(context)
-
 	// now that the node name can change in flight, use a consistent one across deletes
 	whoAmI := distributed.RemoteAccess().WhoAmI()
 	for i, pair := range deletes {
@@ -150,7 +139,7 @@ func (b *transactionsKeyspace) Delete(deletes []value.Pair, context datastore.Qu
 				func(warn errors.Error) {
 					context.Warning(warn)
 				},
-				creds, authToken)
+				distributed.NO_CREDS, "")
 
 			// local entry
 		} else {

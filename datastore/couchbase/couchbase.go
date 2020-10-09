@@ -451,9 +451,9 @@ func (s *store) GetUserInfoAll() ([]datastore.User, errors.Error) {
 		for j, r := range u.Roles {
 			roles[j].Name = r.Role
 			if r.CollectionName != "" && r.CollectionName != "*" {
-				roles[j].Target = r.BucketName + "." + r.ScopeName + "." + r.CollectionName
+				roles[j].Target = r.BucketName + ":" + r.ScopeName + ":" + r.CollectionName
 			} else if r.ScopeName != "" && r.ScopeName != "*" {
-				roles[j].Target = r.BucketName + "." + r.ScopeName
+				roles[j].Target = r.BucketName + ":" + r.ScopeName
 			} else if r.BucketName != "" {
 				roles[j].Target = r.BucketName
 			}
@@ -472,13 +472,7 @@ func (s *store) PutUserInfo(u *datastore.User) errors.Error {
 	for i, r := range u.Roles {
 		outputUser.Roles[i].Role = r.Name
 		if len(r.Target) > 0 {
-			bytes := []byte(r.Target)
-			for i := 0; i < len(bytes); i++ {
-				if bytes[i] == '.' {
-					bytes[i] = ':'
-				}
-			}
-			outputUser.Roles[i].BucketName = string(bytes)
+			outputUser.Roles[i].BucketName = r.Target
 		}
 	}
 	err := s.client.PutUserInfo(&outputUser)
@@ -1449,7 +1443,7 @@ func (b *keyspace) fetch(fullName, qualifiedName, scopeName, collectionName stri
 
 	if txContext, _ := context.GetTxContext().(*transactions.TranContext); txContext != nil {
 		return b.txFetch(fullName, qualifiedName, scopeName, collectionName, getCollectionId(clientContext...),
-			keys, fetchMap, context, subPaths, txContext)
+			keys, fetchMap, context, subPaths, false, txContext)
 	}
 
 	var noVirtualDocAttr bool
@@ -1538,14 +1532,12 @@ func doFetch(k string, fullName string, v *gomemcached.MCResponse) value.Annotat
 		meta_type = "base64"
 	}
 
-	val.SetAttachment("meta", map[string]interface{}{
-		"id":         k,
-		"keyspace":   fullName,
-		"cas":        v.Cas,
-		"type":       meta_type,
-		"flags":      flags,
-		"expiration": expiration,
-	})
+	meta := val.NewMeta()
+	meta["keyspace"] = fullName
+	meta["cas"] = v.Cas
+	meta["type"] = meta_type
+	meta["flags"] = flags
+	meta["expiration"] = expiration
 	val.SetId(k)
 
 	// Uncomment when needed
@@ -1619,19 +1611,15 @@ func getSubDocFetchResults(k string, v *gomemcached.MCResponse, subPaths []strin
 		delete(xVal, "$document")
 	}
 
-	a := map[string]interface{}{
-		"id":         k,
-		"cas":        v.Cas,
-		"type":       meta_type,
-		"flags":      flags,
-		"expiration": exptime,
-	}
-
+	meta := val.NewMeta()
+	meta["cas"] = v.Cas
+	meta["type"] = meta_type
+	meta["flags"] = flags
+	meta["expiration"] = exptime
 	if len(xVal) > 0 {
-		a["xattrs"] = xVal
+		meta["xattrs"] = xVal
 	}
 
-	val.SetAttachment("meta", a)
 	val.SetId(k)
 
 	return val
@@ -1670,7 +1658,7 @@ func getMeta(key string, val value.Value, must bool) (cas uint64, flags uint32, 
 	var ok bool
 
 	if av, ok = val.(value.AnnotatedValue); ok && av != nil {
-		meta, ok = av.GetAttachment("meta").(map[string]interface{})
+		meta = av.GetMeta()
 	}
 
 	if _, ok = meta["cas"]; ok {
@@ -1695,6 +1683,14 @@ func getMeta(key string, val value.Value, must bool) (cas uint64, flags uint32, 
 
 	return cas, flags, txnMeta, nil
 
+}
+
+func SetMetaCas(val value.Value, cas uint64) bool {
+	if av, ok := val.(value.AnnotatedValue); ok && av != nil {
+		av.NewMeta()["cas"] = cas
+		return true
+	}
+	return false
 }
 
 func getExpiration(options value.Value) (exptime uint32) {
@@ -1732,7 +1728,7 @@ func (b *keyspace) performOp(op MutateOp, qualifiedName, scopeName, collectionNa
 			exptime = int(getExpiration(kv.Options))
 		}
 
-		//mv := kv.Value.GetAttachment("meta")
+		//mv := kv.Value.GetMeta()
 
 		// TODO Need to also set meta
 

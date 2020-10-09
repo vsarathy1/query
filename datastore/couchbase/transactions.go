@@ -7,6 +7,8 @@
 //  either express or implied. See the License for the specific language governing permissions
 //  and limitations under the License.
 
+// +build enterprise
+
 package couchbase
 
 import (
@@ -53,6 +55,7 @@ func MutateOpToName(op MutateOp) string {
 
 type MutationValue struct {
 	Op         MutateOp
+	KvCas      uint64
 	Cas        uint64
 	Expiration uint32
 	Flags      uint32
@@ -73,6 +76,7 @@ type TransactionLogValue struct {
 	logType       int
 	key           string
 	oldOp         MutateOp
+	oldKvCas      uint64
 	oldCas        uint64
 	oldExpiration uint32
 	oldFlags      uint32
@@ -105,6 +109,7 @@ const (
 	_TM_DEF_LOGSIZE    = 256 //fixed log size
 	_TM_DEF_SAVEPOINTS = 4
 	_TM_DEF_KEYSPACES  = 4
+	_WRITE_BATCH_SIZE  = 16
 )
 
 /* New Mutations structure. One per transaction
@@ -209,9 +214,9 @@ func (this *TransactionMutations) SetSavepoint(sname string) (err errors.Error) 
 	this.mutex.Lock()
 	defer this.mutex.Unlock()
 
-	// Add savepoint marker to transaction log and set log position
-	err = this.AddMarker(sname, TL_SAVEPOINT)
+	// set log position and Add savepoint marker to transaction log
 	this.savepoints[sname] = this.TotalMutations()
+	err = this.AddMarker(sname, TL_SAVEPOINT)
 	return err
 
 }
@@ -310,7 +315,7 @@ DELETE   INSERT   ---  UPDATE with cas  *
 
 func (this *TransactionMutations) Add(op MutateOp, keyspace, bucketName, scopeName, collectionName string,
 	collId uint32, key string, val interface{}, cas uint64, flags, exptime uint32, txnMeta interface{},
-	paths []string, ks *keyspace) (err errors.Error) {
+	paths []string, ks *keyspace) (retCas uint64, err errors.Error) {
 
 	this.mutex.Lock()
 	defer this.mutex.Unlock()
@@ -335,7 +340,7 @@ func (this *TransactionMutations) Add(op MutateOp, keyspace, bucketName, scopeNa
 				scopeName:      scopeName,
 				collectionName: collectionName}
 			if mdk.values == nil {
-				return errors.NewMemoryAllocationError("TransactionMutations.AddToDeltaKeyspace()")
+				return retCas, errors.NewMemoryAllocationError("TransactionMutations.AddToDeltaKeyspace()")
 			}
 			this.keyspaces[keyspace] = mdk
 		}
@@ -346,8 +351,8 @@ func (this *TransactionMutations) Add(op MutateOp, keyspace, bucketName, scopeNa
 	if mdk != nil {
 		mmv = mdk.Get(key)
 		if mmv != nil {
-			if mmv.Cas != 0 {
-				cas = mmv.Cas // new CAS value becoms original CAS value
+			if mmv.KvCas != 0 {
+				cas = mmv.KvCas // new CAS value becoms original CAS value
 			}
 			if mmv.TxnMeta != nil {
 				txnMeta = mmv.TxnMeta // new txnMeta value becomes original TxnMeta value
@@ -359,7 +364,7 @@ func (this *TransactionMutations) Add(op MutateOp, keyspace, bucketName, scopeNa
 	case MOP_INSERT:
 		// Inserted key present current statement or previous statement error.
 		if mv != nil || (mmv != nil && (mmv.Op == MOP_INSERT || mmv.Op == MOP_UPSERT || mmv.Op == MOP_UPDATE)) {
-			return errors.NewDuplicateKeyError(key)
+			return retCas, errors.NewDuplicateKeyError(key)
 		}
 
 		// Previous statement has MOP_DELETE and non zero CAS transform to MOP_UPDATE
@@ -384,7 +389,7 @@ func (this *TransactionMutations) Add(op MutateOp, keyspace, bucketName, scopeNa
 		}
 	case MOP_DELETE:
 	default:
-		return nil
+		return retCas, nil
 	}
 
 	// If curKeyspace and keyspace is different store the info in current delta keyspace (Statement switch)
@@ -404,10 +409,10 @@ func (this *TransactionMutations) Add(op MutateOp, keyspace, bucketName, scopeNa
 		*/
 		if addMarker {
 			// Add keyspace marker to transaction log
-			if err = this.AddMarker(keyspace, TL_KEYSPACE); err != nil {
-				return err
-			}
 			this.curStartLogIndex = this.TotalMutations()
+			if err = this.AddMarker(keyspace, TL_KEYSPACE); err != nil {
+				return retCas, err
+			}
 		}
 
 		// Add document to transaction log
@@ -419,14 +424,15 @@ func (this *TransactionMutations) Add(op MutateOp, keyspace, bucketName, scopeNa
 
 	if err == nil {
 		// Add mutation value to current delta keyspace
-		mv = &MutationValue{Op: op, Val: val, Cas: cas, Expiration: exptime, Flags: flags, TxnMeta: txnMeta}
+		retCas = uint64(time.Now().UTC().UnixNano())
+		mv = &MutationValue{Op: op, Val: val, Cas: retCas, KvCas: cas, Expiration: exptime, Flags: flags, TxnMeta: txnMeta}
 		if mv == nil {
-			return errors.NewMemoryAllocationError("TransactionMutations.Add()")
+			return retCas, errors.NewMemoryAllocationError("TransactionMutations.Add()")
 		}
 		dk.Add(key, mv)
 	}
 
-	return err
+	return retCas, err
 }
 
 /* Set current Log position
@@ -580,8 +586,9 @@ func (this *TransactionMutations) UndoLog(sLog, sLogValIndex uint64) (err errors
 				tl.logValues = tl.logValues[:sci]
 			}
 		}
-		this.curLog = cl
+		this.curLog = startLog
 		this.logs = this.logs[:this.curLog+1]
+		this.curKeyspace = ""
 		this.curStartLogIndex = this.TotalMutations()
 		for s, v := range this.savepoints {
 			if v > this.curStartLogIndex {
@@ -643,7 +650,6 @@ func (this *TransactionMutations) MergeDeltaKeyspace() (err errors.Error) {
 	if len(this.savepoints) > 0 {
 		// savepoints present add end TL_KEYSPACE marker
 		err = this.AddMarker(keyspace, TL_KEYSPACE)
-		this.curStartLogIndex = this.TotalMutations()
 	}
 
 	// reset curKeyspace
@@ -681,8 +687,8 @@ func (this *DeltaKeyspace) Write(transaction *gctx.Transaction, txnInternal *gct
 		return
 	}
 
-	if bSize > _DK_DEF_SIZE {
-		bSize = _DK_DEF_SIZE
+	if bSize > _WRITE_BATCH_SIZE {
+		bSize = _WRITE_BATCH_SIZE
 	}
 
 	wops := make(gcagent.WriteOps, 0, bSize)
@@ -705,7 +711,7 @@ func (this *DeltaKeyspace) Write(transaction *gctx.Transaction, txnInternal *gct
 				Key:     key,
 				Data:    data,
 				TxnMeta: txnMeta,
-				Cas:     mv.Cas,
+				Cas:     mv.KvCas,
 				Expiry:  mv.Expiration})
 
 			if len(wops) == bSize {
@@ -769,6 +775,7 @@ func (this *TransactionLogValue) Add(mv *MutationValue) (err errors.Error) {
 	if mv != nil {
 		this.oldOp = mv.Op
 		this.oldCas = mv.Cas
+		this.oldKvCas = mv.KvCas
 		this.oldExpiration = mv.Expiration
 		this.oldFlags = mv.Flags
 		this.oldVal = mv.Val
@@ -795,6 +802,7 @@ func (this *TransactionLogValue) Undo(dk *DeltaKeyspace) (err errors.Error) {
 		}
 		mv.Op = this.oldOp
 		mv.Cas = this.oldCas
+		mv.KvCas = this.oldKvCas
 		mv.Expiration = this.oldExpiration
 		mv.Flags = this.oldFlags
 		mv.Val = this.oldVal

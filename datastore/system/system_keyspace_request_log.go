@@ -70,8 +70,6 @@ func (b *requestLogKeyspace) Indexers() ([]datastore.Indexer, errors.Error) {
 func (b *requestLogKeyspace) Fetch(keys []string, keysMap map[string]value.AnnotatedValue,
 	context datastore.QueryContext, subPaths []string) (errs []errors.Error) {
 
-	creds, authToken := credsFromContext(context)
-
 	// now that the node name can change in flight, use a consistent one across fetches
 	whoAmI := distributed.RemoteAccess().WhoAmI()
 	for _, key := range keys {
@@ -83,25 +81,24 @@ func (b *requestLogKeyspace) Fetch(keys []string, keysMap map[string]value.Annot
 				"completed_requests", "POST",
 				func(doc map[string]interface{}) {
 
-					meta := map[string]interface{}{
-						"id":       key,
-						"keyspace": b.fullName,
-					}
 					t, ok := doc["timings"]
 					if ok {
-						meta["plan"] = t
 						delete(doc, "timings")
 					}
 					remoteValue := value.NewAnnotatedValue(doc)
+					meta := remoteValue.NewMeta()
+					meta["keyspace"] = b.fullName
+					if ok {
+						meta["plan"] = t
+					}
 					remoteValue.SetField("node", node)
-					remoteValue.SetAttachment("meta", meta)
 					remoteValue.SetId(key)
 					keysMap[key] = remoteValue
 				},
 				func(warn errors.Error) {
 					context.Warning(warn)
 				},
-				creds, authToken)
+				distributed.NO_CREDS, "")
 		} else {
 
 			// local entry
@@ -186,10 +183,8 @@ func (b *requestLogKeyspace) Fetch(keys []string, keysMap map[string]value.Annot
 					item.SetField("errors", errors)
 				}
 
-				meta := map[string]interface{}{
-					"id":       key,
-					"keyspace": b.fullName,
-				}
+				meta := item.NewMeta()
+				meta["keyspace"] = b.fullName
 				if entry.Timings != nil {
 					bytes, _ := json.Marshal(entry.Timings)
 					meta["plan"] = bytes
@@ -198,7 +193,6 @@ func (b *requestLogKeyspace) Fetch(keys []string, keysMap map[string]value.Annot
 						meta["optimizerEstimates"] = bytes
 					}
 				}
-				item.SetAttachment("meta", meta)
 				item.SetId(key)
 				keysMap[key] = item
 			})
@@ -225,8 +219,6 @@ func (b *requestLogKeyspace) Upsert(upserts []value.Pair, context datastore.Quer
 func (b *requestLogKeyspace) Delete(deletes []value.Pair, context datastore.QueryContext) ([]value.Pair, errors.Error) {
 	var err errors.Error
 
-	creds, authToken := credsFromContext(context)
-
 	// now that the node name can change in flight, use a consistent one across deletes
 	whoAmI := distributed.RemoteAccess().WhoAmI()
 	for i, pair := range deletes {
@@ -241,7 +233,7 @@ func (b *requestLogKeyspace) Delete(deletes []value.Pair, context datastore.Quer
 				func(warn errors.Error) {
 					context.Warning(warn)
 				},
-				creds, authToken)
+				distributed.NO_CREDS, "")
 
 			// local entry
 		} else {

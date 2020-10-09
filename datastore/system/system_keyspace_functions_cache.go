@@ -70,8 +70,6 @@ func (b *functionsCacheKeyspace) Indexers() ([]datastore.Indexer, errors.Error) 
 func (b *functionsCacheKeyspace) Fetch(keys []string, keysMap map[string]value.AnnotatedValue,
 	context datastore.QueryContext, subPaths []string) (errs []errors.Error) {
 
-	creds, authToken := credsFromContext(context)
-
 	// now that the node name can change in flight, use a consistent one across fetches
 	whoAmI := distributed.RemoteAccess().WhoAmI()
 	for _, key := range keys {
@@ -85,16 +83,13 @@ func (b *functionsCacheKeyspace) Fetch(keys []string, keysMap map[string]value.A
 
 					remoteValue := value.NewAnnotatedValue(doc)
 					remoteValue.SetField("node", node)
-					remoteValue.SetAttachment("meta", map[string]interface{}{
-						"id":       key,
-						"keyspace": b.fullName,
-					})
+					remoteValue.NewMeta()["keyspace"] = b.fullName
 					remoteValue.SetId(key)
 					keysMap[key] = remoteValue
 				},
 				func(warn errors.Error) {
 					context.Warning(warn)
-				}, creds, authToken)
+				}, distributed.NO_CREDS, "")
 		} else {
 
 			// local entry
@@ -118,10 +113,7 @@ func (b *functionsCacheKeyspace) Fetch(keys []string, keysMap map[string]value.A
 					itemMap["maxServiceTime"] = time.Duration(entry.MaxServiceTime).String()
 				}
 				item := value.NewAnnotatedValue(itemMap)
-				item.SetAttachment("meta", map[string]interface{}{
-					"id":       key,
-					"keyspace": b.fullName,
-				})
+				item.NewMeta()["keyspace"] = b.fullName
 				item.SetId(key)
 				keysMap[key] = item
 			})
@@ -147,8 +139,6 @@ func (b *functionsCacheKeyspace) Upsert(upserts []value.Pair, context datastore.
 
 func (b *functionsCacheKeyspace) Delete(deletes []value.Pair, context datastore.QueryContext) ([]value.Pair, errors.Error) {
 
-	creds, authToken := credsFromContext(context)
-
 	// now that the node name can change in flight, use a consistent one across deletes
 	whoAmI := distributed.RemoteAccess().WhoAmI()
 	for _, pair := range deletes {
@@ -163,7 +153,7 @@ func (b *functionsCacheKeyspace) Delete(deletes []value.Pair, context datastore.
 				func(warn errors.Error) {
 					context.Warning(warn)
 				},
-				creds, authToken)
+				distributed.NO_CREDS, "")
 
 		} else {
 			// local entry

@@ -71,8 +71,6 @@ func (b *preparedsKeyspace) Indexers() ([]datastore.Indexer, errors.Error) {
 func (b *preparedsKeyspace) Fetch(keys []string, keysMap map[string]value.AnnotatedValue,
 	context datastore.QueryContext, subPaths []string) (errs []errors.Error) {
 
-	creds, authToken := credsFromContext(context)
-
 	// now that the node name can change in flight, use a consistent one across fetches
 	whoAmI := distributed.RemoteAccess().WhoAmI()
 	for _, key := range keys {
@@ -83,32 +81,24 @@ func (b *preparedsKeyspace) Fetch(keys []string, keysMap map[string]value.Annota
 			distributed.RemoteAccess().GetRemoteDoc(node, localKey,
 				"prepareds", "POST",
 				func(doc map[string]interface{}) {
-					m := map[string]interface{}{
-						"id":       key,
-						"keyspace": b.fullName,
-					}
-
-					m["plan"] = doc["plan"]
-					m["txPlans"] = doc["txPlans"]
-					delete(doc, "plan")
-					delete(doc, "txPlans")
 					remoteValue := value.NewAnnotatedValue(doc)
 					remoteValue.SetField("node", node)
-					remoteValue.SetAttachment("meta", m)
+					m := remoteValue.NewMeta()
+					m["keyspace"] = b.fullName
+					m["plan"] = doc["plan"]
+					m["txPlans"] = doc["txPlans"]
+					remoteValue.UnsetField("plan")
+					remoteValue.UnsetField("txPlans")
 					remoteValue.SetId(key)
 					keysMap[key] = remoteValue
 				},
 				func(warn errors.Error) {
 					context.Warning(warn)
-				}, creds, authToken)
+				}, distributed.NO_CREDS, "")
 		} else {
 
 			// local entry
 			prepareds.PreparedDo(localKey, func(entry *prepareds.CacheEntry) {
-				m := map[string]interface{}{
-					"id":       key,
-					"keyspace": b.fullName,
-				}
 				itemMap := map[string]interface{}{
 					"name":            localKey,
 					"uses":            entry.Uses,
@@ -131,7 +121,6 @@ func (b *preparedsKeyspace) Fetch(keys []string, keysMap map[string]value.Annota
 				txPrepards, txPlans := entry.Prepared.TxPrepared()
 				if len(txPrepards) > 0 {
 					itemMap["txPrepards"] = txPrepards
-					m["txPlans"] = txPlans
 				}
 
 				if node != "" {
@@ -151,9 +140,12 @@ func (b *preparedsKeyspace) Fetch(keys []string, keysMap map[string]value.Annota
 					itemMap["maxServiceTime"] = time.Duration(entry.MaxServiceTime).String()
 				}
 				item := value.NewAnnotatedValue(itemMap)
+				m := item.NewMeta()
+				m["keyspace"] = b.fullName
+				if len(txPrepards) > 0 {
+					m["txPlans"] = txPlans
+				}
 				m["plan"], _ = json.Marshal(entry.Prepared.Operator)
-				item.SetAttachment("meta", m)
-
 				item.SetId(key)
 				keysMap[key] = item
 			})
@@ -180,8 +172,6 @@ func (b *preparedsKeyspace) Upsert(upserts []value.Pair, context datastore.Query
 func (b *preparedsKeyspace) Delete(deletes []value.Pair, context datastore.QueryContext) ([]value.Pair, errors.Error) {
 	var err errors.Error
 
-	creds, authToken := credsFromContext(context)
-
 	// now that the node name can change in flight, use a consistent one across deletes
 	whoAmI := distributed.RemoteAccess().WhoAmI()
 	for i, pair := range deletes {
@@ -196,7 +186,7 @@ func (b *preparedsKeyspace) Delete(deletes []value.Pair, context datastore.Query
 				func(warn errors.Error) {
 					context.Warning(warn)
 				},
-				creds, authToken)
+				distributed.NO_CREDS, "")
 
 			// local entry
 		} else {

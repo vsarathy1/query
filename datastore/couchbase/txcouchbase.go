@@ -7,6 +7,8 @@
 //  either express or implied. See the License for the specific language governing permissions
 //  and limitations under the License.
 
+// +build enterprise
+
 package couchbase
 
 import (
@@ -60,6 +62,13 @@ func (s *store) StartTransaction(stmtAtomicity bool, context datastore.QueryCont
 			return
 		}
 
+		defer func() {
+			// protect from the panics
+			if r := recover(); r != nil {
+				err = errors.NewStartTransactionError(fmt.Errorf("Panic: %v", r))
+			}
+		}()
+
 		gcAgentTxs := s.gcClient.Transactions()
 		if gcAgentTxs == nil {
 			return nil, errors.NewStartTransactionError(gcagent.ErrNoInitTransactions)
@@ -107,7 +116,7 @@ func (s *store) StartTransaction(stmtAtomicity bool, context datastore.QueryCont
 				qualifiedName := "default:" + mutation.BucketName + "." +
 					mutation.ScopeName + "." + mutation.CollectionName
 
-				err = txMutations.Add(op, qualifiedName, mutation.BucketName, mutation.ScopeName,
+				_, err = txMutations.Add(op, qualifiedName, mutation.BucketName, mutation.ScopeName,
 					mutation.CollectionName, uint32(0),
 					string(mutation.Key), mutation.Staged, uint64(mutation.Cas), uint32(0), uint32(0),
 					nil, nil, nil)
@@ -121,7 +130,7 @@ func (s *store) StartTransaction(stmtAtomicity bool, context datastore.QueryCont
 	return
 }
 
-func (s *store) CommitTransaction(stmtAtomicity bool, context datastore.QueryContext) errors.Error {
+func (s *store) CommitTransaction(stmtAtomicity bool, context datastore.QueryContext) (errOut errors.Error) {
 	txContext, _ := context.GetTxContext().(*transactions.TranContext)
 	if txContext == nil {
 		return nil
@@ -156,6 +165,13 @@ func (s *store) CommitTransaction(stmtAtomicity bool, context datastore.QueryCon
 	if transaction != nil {
 		var wg sync.WaitGroup
 
+		defer func() {
+			// protect from the panics
+			if r := recover(); r != nil {
+				errOut = errors.NewCommitTransactionError(fmt.Errorf("Panic: %v", r), diag)
+			}
+		}()
+
 		logging.Tracef("=====%v=====Actual Commit begin========", txId)
 		wg.Add(1)
 		err = transaction.Commit(func(resErr error) {
@@ -187,7 +203,7 @@ func (s *store) CommitTransaction(stmtAtomicity bool, context datastore.QueryCon
 	return nil
 }
 
-func (s *store) RollbackTransaction(stmtAtomicity bool, context datastore.QueryContext, sname string) errors.Error {
+func (s *store) RollbackTransaction(stmtAtomicity bool, context datastore.QueryContext, sname string) (errOut errors.Error) {
 	txContext, _ := context.GetTxContext().(*transactions.TranContext)
 	if txContext == nil {
 		return nil
@@ -217,6 +233,13 @@ func (s *store) RollbackTransaction(stmtAtomicity bool, context datastore.QueryC
 	transaction := txMutations.Transaction()
 	if transaction != nil {
 		var wg sync.WaitGroup
+
+		defer func() {
+			// protect from the panics
+			if r := recover(); r != nil {
+				errOut = errors.NewRollbackTransactionError(fmt.Errorf("Panic: %v", r), diag)
+			}
+		}()
 
 		wg.Add(1)
 		err = transaction.Rollback(func(resErr error) {
@@ -324,7 +347,7 @@ func (ks *keyspace) txReady(txContext *transactions.TranContext) errors.Error {
 }
 
 func (ks *keyspace) txFetch(fullName, qualifiedName, scopeName, collectionName string, collId uint32, keys []string,
-	fetchMap map[string]value.AnnotatedValue, context datastore.QueryContext, subPaths []string,
+	fetchMap map[string]value.AnnotatedValue, context datastore.QueryContext, subPaths []string, sdkKvInsert bool,
 	txContext *transactions.TranContext) errors.Errors {
 
 	err := ks.txReady(txContext)
@@ -347,26 +370,42 @@ func (ks *keyspace) txFetch(fullName, qualifiedName, scopeName, collectionName s
 
 		for k, mv := range mvs {
 			av := value.NewAnnotatedValue(mv.Val)
-			av.SetAttachment("meta", map[string]interface{}{
-				"id":         k,
-				"keyspace":   fullName,
-				"cas":        mv.Cas,
-				"type":       "json",
-				"flags":      uint32(0),
-				"expiration": mv.Expiration,
-				"txnMeta":    mv.TxnMeta,
-			})
+			meta := av.NewMeta()
+			meta["keyspace"] = fullName
+			meta["cas"] = mv.Cas
+			meta["type"] = "json"
+			meta["flags"] = uint32(0)
+			meta["expiration"] = mv.Expiration
+			meta["txnMeta"] = mv.TxnMeta
 			av.SetId(k)
 			fetchMap[k] = av
 		}
 	}
 
 	if len(fkeys) > 0 {
-		// fetch the keys that are not present in delta keyspace
-		errs := ks.agentProvider.TxGet(transaction, fullName, ks.name, scopeName, collectionName,
-			collId, fkeys, subPaths, context.GetReqDeadline(), false, fetchMap)
-		if len(errs) > 0 {
-			return errors.NewErrors(errs, "txFetch")
+		sdkKv, sdkCas, sdkTxnMeta := GetTxDataValues(context.TxDataVal())
+		if sdkKv && sdkCas != 0 && len(fkeys) == 1 && sdkTxnMeta != nil {
+			// Transformed SDK REPLACE, DELETE with CAS don't read the document
+			k := fkeys[0]
+			av := value.NewAnnotatedValue(value.NewValue(nil))
+			meta := av.NewMeta()
+			meta["keyspace"] = fullName
+			meta["cas"] = sdkCas
+			meta["type"] = "json"
+			meta["flags"] = uint32(0)
+			meta["expiration"] = uint32(0)
+			meta["txnMeta"] = sdkTxnMeta
+			av.SetId(k)
+			fetchMap[k] = av
+		} else {
+			// Transformed SDK operation, don't ignore key not found error (except insert check)
+			notFoundErr := sdkKv && !sdkKvInsert
+			// fetch the keys that are not present in delta keyspace
+			errs := ks.agentProvider.TxGet(transaction, fullName, ks.name, scopeName, collectionName,
+				collId, fkeys, subPaths, context.GetReqDeadline(), false, notFoundErr, fetchMap)
+			if len(errs) > 0 {
+				return errors.NewErrors(errs, "txFetch")
+			}
 		}
 	}
 
@@ -384,23 +423,27 @@ func (ks *keyspace) txPerformOp(op MutateOp, qualifiedName, scopeName, collectio
 
 	txMutations := txContext.TxMutations().(*TransactionMutations)
 	var fetchMap map[string]value.AnnotatedValue
+	sdkKv, sdkCas, sdkTxnMeta := GetTxDataValues(context.TxDataVal())
+	sdkKvInsert := sdkKv && op == MOP_INSERT
 
-	switch op {
-	case /*MOP_INSERT,*/ MOP_UPSERT:
-		// INSERT, UPSERT check keys and transform to INSERT or UPDATE
+	if op == MOP_UPSERT || sdkKvInsert {
+		// SDK INSERT check key in KV by reading
+		// UPSERT check keys and transform to INSERT or UPDATE
+
 		fetchMap = make(map[string]value.AnnotatedValue, len(pairs))
 		fkeys := make([]string, 0, len(pairs))
 		for _, kv := range pairs {
 			fkeys = append(fkeys, kv.Name)
 		}
 		errs := ks.txFetch("", qualifiedName, scopeName, collectionName, collId,
-			fkeys, fetchMap, context, nil, txContext)
+			fkeys, fetchMap, context, nil, sdkKvInsert, txContext)
 		if len(errs) > 0 {
 			return nil, errs[0]
 		}
 	}
 
 	mPairs = make(value.Pairs, 0, len(pairs))
+	var retCas uint64
 	for _, kv := range pairs {
 		var data interface{}
 		var exptime uint32
@@ -414,7 +457,7 @@ func (ks *keyspace) txPerformOp(op MutateOp, qualifiedName, scopeName, collectio
 			exptime = getExpiration(kv.Options)
 		}
 
-		if /*op == MOP_INSERT || */ op == MOP_UPSERT {
+		if op == MOP_INSERT || op == MOP_UPSERT {
 			// INSERT, UPSERT transform to INSERT or UPDATE
 			if av, ok := fetchMap[key]; ok {
 				if op == MOP_UPSERT {
@@ -430,23 +473,34 @@ func (ks *keyspace) txPerformOp(op MutateOp, qualifiedName, scopeName, collectio
 
 		must := (nop == MOP_UPDATE || nop == MOP_DELETE)
 		cas, _, txnMeta, err1 := getMeta(kv.Name, val, must)
-		if err1 == nil && must && txnMeta == nil {
-			err1 = fmt.Errorf("Not valid txnMeta value for key %v", kv.Name)
-		} else if nop == MOP_INSERT {
-			txnMeta = []byte("{}")
+		if err1 == nil && must {
+			if txnMeta == nil || (sdkKv && sdkTxnMeta == nil) {
+				err1 = fmt.Errorf("Not valid txnMeta value for key %v", kv.Name)
+			} else if sdkKv && sdkCas != cas {
+				err1 = fmt.Errorf("Missmatch cas values(%v,%v) for key %v", sdkCas, cas, kv.Name)
+			}
 		}
 
 		if err1 != nil {
 			return nil, errors.NewTransactionError(err1, _MutateOpNames[op])
 		}
 
+		if nop == MOP_INSERT {
+			txnMeta = []byte("{}")
+		}
+
 		// Add to mutations
-		err = txMutations.Add(nop, qualifiedName, ks.name, scopeName, collectionName, collId,
+		retCas, err = txMutations.Add(nop, qualifiedName, ks.name, scopeName, collectionName, collId,
 			key, data, cas, MV_FLAGS_WRITE, exptime, txnMeta, nil, ks)
 
 		if err != nil {
 			return nil, err
 		}
+
+		if retCas > 0 && !SetMetaCas(val, retCas) {
+			return nil, errors.NewTransactionError(fmt.Errorf("Setting return cas error"), _MutateOpNames[op])
+		}
+
 		mPairs = append(mPairs, kv)
 	}
 
@@ -457,6 +511,23 @@ func (ks *keyspace) txPerformOp(op MutateOp, qualifiedName, scopeName, collectio
 		}
 	}
 
+	return
+}
+
+func GetTxDataValues(txDataVal value.Value) (kv bool, cas uint64, txnMeta interface{}) {
+	if txDataVal != nil {
+		if v, ok := txDataVal.Field("kv"); ok {
+			kv, _ = v.Actual().(bool)
+		}
+
+		if v, ok := txDataVal.Field("cas"); ok && v.Type() == value.NUMBER {
+			cas = uint64(value.AsNumberValue(v).Int64())
+		}
+
+		if v, ok := txDataVal.Field("txnMeta"); ok && v.Type() == value.OBJECT {
+			txnMeta, _ = v.MarshalJSON()
+		}
+	}
 	return
 }
 

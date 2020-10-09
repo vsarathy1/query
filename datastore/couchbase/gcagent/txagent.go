@@ -7,11 +7,14 @@
 //  either express or implied. See the License for the specific language governing permissions
 //  and limitations under the License.
 
+// +build enterprise
+
 package gcagent
 
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"sync"
 	"time"
 
@@ -65,28 +68,34 @@ func (ap *AgentProvider) getTxAnnotatedValue(res *gctx.GetResult, key, fullName 
 		meta_type = "base64"
 	}
 
-	av.SetAttachment("meta", map[string]interface{}{
-		"id":         key,
-		"keyspace":   fullName,
-		"cas":        uint64(res.Cas),
-		"type":       meta_type,
-		"flags":      uint32(0),
-		"expiration": uint32(0),
-		"txnMeta":    txnMetaBytes,
-	})
+	meta := av.NewMeta()
+	meta["keyspace"] = fullName
+	meta["cas"] = uint64(res.Cas)
+	meta["type"] = meta_type
+	meta["flags"] = uint32(0)
+	meta["expiration"] = uint32(0)
+	meta["txnMeta"] = txnMetaBytes
 	av.SetId(key)
+
 	return av, nil
 }
 
 // bulk transactional get
 
 func (ap *AgentProvider) TxGet(transaction *gctx.Transaction, fullName, bucketName, scopeName, collectionName string,
-	collectionID uint32, keys, paths []string, reqDeadline time.Time, replica bool,
+	collectionID uint32, keys, paths []string, reqDeadline time.Time, replica, notFoundErr bool,
 	fetchMap map[string]value.AnnotatedValue) (errs []error) {
 
 	if len(paths) > 0 && paths[0] != "$document.exptime" {
 		return append(errs, ErrNoSubDocInTransaction)
 	}
+
+	defer func() {
+		// protect from panics
+		if r := recover(); r != nil {
+			errs = append(errs, fmt.Errorf("TxGet() Panic: %v", r))
+		}
+	}()
 
 	// send the request and get results in call back
 	wg := &sync.WaitGroup{}
@@ -111,12 +120,20 @@ func (ap *AgentProvider) TxGet(transaction *gctx.Transaction, fullName, bucketNa
 		return cerr
 	}
 
+	var prevErr error
 	items := make([]*GetOp, 0, len(keys))
 	for _, k := range keys {
 		gop := &GetOp{Key: k}
 		if err := sendOneGet(gop); err != nil {
-			// request send failed. no need to wait to complete.
-			return append(errs, err)
+			// process other errors before processing PreviousOperationFailed
+			if err1, ok1 := err.(*gctx.TransactionOperationFailedError); ok1 &&
+				errors.Is(err1.Unwrap(), gctx.ErrPreviousOperationFailed) {
+				prevErr = err
+				break
+			} else {
+				// request send failed. no need to wait to complete.
+				return append(errs, err)
+			}
 		}
 		items = append(items, gop)
 	}
@@ -127,10 +144,14 @@ func (ap *AgentProvider) TxGet(transaction *gctx.Transaction, fullName, bucketNa
 	for _, item := range items {
 		if item.Err == nil && item.Val != nil {
 			fetchMap[item.Key] = item.Val
-		} else if !errors.Is(item.Err, gocbcore.ErrDocumentNotFound) {
+		} else if notFoundErr || !errors.Is(item.Err, gocbcore.ErrDocumentNotFound) {
 			// handle key not found error
 			errs = append(errs, item.Err)
 		}
+	}
+
+	if len(errs) == 0 && prevErr != nil {
+		errs = append(errs, prevErr)
 	}
 
 	return errs
@@ -154,6 +175,13 @@ type WriteOp struct {
 func (ap *AgentProvider) TxWrite(transaction *gctx.Transaction, txnInternal *gctx.TransactionsInternal,
 	bucketName, scopeName, collectionName string,
 	collectionID uint32, reqDeadline time.Time, wops WriteOps) (errOut error) {
+
+	defer func() {
+		// protect from panics
+		if r := recover(); r != nil {
+			errOut = fmt.Errorf("TxWrite() Panic: %v", r)
+		}
+	}()
 
 	wg := &sync.WaitGroup{}
 	txId := transaction.Attempt().ID
@@ -213,6 +241,7 @@ func (ap *AgentProvider) TxWrite(transaction *gctx.Transaction, txnInternal *gct
 		return cerr
 	}
 
+	var prevErr error
 	for _, op := range wops {
 		switch op.Op {
 		case MOP_INSERT:
@@ -249,7 +278,14 @@ func (ap *AgentProvider) TxWrite(transaction *gctx.Transaction, txnInternal *gct
 			errOut = ErrUnknownOperation
 		}
 		if errOut != nil {
-			return errOut
+			// process other errors before processing PreviousOperationFailed
+			if err1, ok1 := errOut.(*gctx.TransactionOperationFailedError); ok1 &&
+				errors.Is(err1.Unwrap(), gctx.ErrPreviousOperationFailed) {
+				prevErr = errOut
+				break
+			} else {
+				return errOut
+			}
 
 		}
 	}
@@ -261,5 +297,5 @@ func (ap *AgentProvider) TxWrite(transaction *gctx.Transaction, txnInternal *gct
 		}
 	}
 
-	return nil
+	return prevErr
 }

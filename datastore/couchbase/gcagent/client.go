@@ -7,6 +7,8 @@
 //  either express or implied. See the License for the specific language governing permissions
 //  and limitations under the License.
 
+// +build enterprise
+
 package gcagent
 
 import (
@@ -77,12 +79,13 @@ type Client struct {
 func NewClient(url, certFile string, defExpirationTime time.Duration) (rv *Client, err error) {
 	auth := &MemcachedAuthProvider{}
 	config := &gocbcore.AgentConfig{
-		ConnectTimeout:   _CONNECTTIMEOUT,
-		KVConnectTimeout: _KVCONNECTTIMEOUT,
-		UseCollections:   true,
-		KvPoolSize:       _kVPOOLSIZE,
-		MaxQueueSize:     _MAXQUEUESIZE,
-		Auth:             auth,
+		ConnectTimeout:       _CONNECTTIMEOUT,
+		KVConnectTimeout:     _KVCONNECTTIMEOUT,
+		UseCollections:       true,
+		KvPoolSize:           _kVPOOLSIZE,
+		MaxQueueSize:         _MAXQUEUESIZE,
+		Auth:                 auth,
+		DefaultRetryStrategy: gocbcore.NewBestEffortRetryStrategy(nil),
 		//UseTLS:           true,
 	}
 
