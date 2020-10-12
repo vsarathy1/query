@@ -108,6 +108,7 @@ type builder struct {
 	orderScan          plan.SecondaryScan
 	baseKeyspaces      map[string]*base.BaseKeyspace
 	keyspaceNames      map[string]string
+	fullKeyspaceNames  map[string]string
 	indexKeyspaceNames map[string]bool // keyspace names that use indexscan (excludes non from caluse subqueries)
 	simpleFromTerms    map[string]algebra.SimpleFromTerm
 	pushableOnclause   expression.Expression // combined ON-clause from all inner joins
@@ -138,6 +139,7 @@ func (this *builder) Copy() *builder {
 		requirePrimaryKey:  this.requirePrimaryKey,
 		baseKeyspaces:      base.CopyBaseKeyspacesWithFilters(this.baseKeyspaces),
 		keyspaceNames:      this.keyspaceNames,
+		fullKeyspaceNames:  this.fullKeyspaceNames,
 		indexKeyspaceNames: this.indexKeyspaceNames,
 		simpleFromTerms:    this.simpleFromTerms,
 		pushableOnclause:   expression.Copy(this.pushableOnclause),

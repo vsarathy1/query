@@ -44,6 +44,7 @@ type IntermediatePlan interface {
 	AddSubchildrenParallel() *plan.Parallel
 	Copy() IntermediatePlan
 	GetBaseKeyspaceNames() []string
+	GetFullyQualBaseKeyspaceNames() []string
 	GetCard() float64
 	GetCumCard() float64
 	GetCumCost() float64
@@ -53,6 +54,7 @@ type Builder interface {
 	CopyBuilder() *builder
 	GetBaseKeyspaces() map[string]*base.BaseKeyspace
 	GetKeyspaceNames() map[string]string
+	GetFullyQualKeyspaceNames() map[string]string
 	GetTermKeyspace(node *algebra.KeyspaceTerm) (datastore.Keyspace, error)
 	AllHints(keyspace datastore.Keyspace, hints algebra.IndexRefs, indexes []datastore.Index, indexApiVersion int, useFts bool) ([]datastore.Index, error)
 	GetSimpleFromTerms() map[string]algebra.SimpleFromTerm
@@ -83,6 +85,7 @@ type Builder interface {
 	SetLastOp(lastOp plan.Operator)
 	SetBaseKeyspaces(basekeyspaces map[string]*base.BaseKeyspace)
 	SetKeyspaceNames(keyspaceNames map[string]string)
+	SetFullyQualKeyspaceNames(map[string]string)
 	SetPushableOnclause(pushableOnclause expression.Expression)
 	SetBuilderFlags(builderFlags uint32)
 	SetMaxParallelism(maxParallelism int)
@@ -108,6 +111,10 @@ func (this *builder) GetBaseKeyspaces() map[string]*base.BaseKeyspace {
 
 func (this *builder) GetKeyspaceNames() map[string]string {
 	return this.keyspaceNames
+}
+
+func (this *builder) GetFullyQualKeyspaceNames() map[string]string {
+	return this.fullKeyspaceNames
 }
 
 func (this *builder) GetTermKeyspace(node *algebra.KeyspaceTerm) (datastore.Keyspace, error) {
@@ -229,6 +236,10 @@ func (this *builder) SetBaseKeyspaces(basekeyspaces map[string]*base.BaseKeyspac
 
 func (this *builder) SetKeyspaceNames(keyspaceNames map[string]string) {
 	this.keyspaceNames = keyspaceNames
+}
+
+func (this *builder) SetFullyQualKeyspaceNames(fullKeyspaceNames map[string]string) {
+	this.fullKeyspaceNames = fullKeyspaceNames
 }
 
 func (this *builder) SetPushableOnclause(pushableOnclause expression.Expression) {
@@ -468,7 +479,7 @@ func (this *builder) BuildJoin(right algebra.SimpleFromTerm, onClause []expressi
 
 		origOnclause := andedOnClause
 		right.SetUnderNL()
-		scans, probePlan, primaryJoinKeys, newOnclause, newFilter, cost, cardinality, err := this.constructJoin(right, onClause, andedOnClause, origJoinFilters, leftPlan, rightPlan, filter, joinCardinality, false /*outerflag is set to false for now */, "join")
+		scans, probePlan, primaryJoinKeys, newOnclause, newFilter, cost, cumCost, cardinality, err := this.constructJoin(right, onClause, andedOnClause, origJoinFilters, leftPlan, rightPlan, filter, joinCardinality, false /*outerflag is set to false for now */, "join")
 		if err != nil { // && !useCBO {
 			// in case of CBO, defer returning error in case hash join is feasible
 			return nil, nil, nil, err
@@ -478,11 +489,11 @@ func (this *builder) BuildJoin(right algebra.SimpleFromTerm, onClause []expressi
 			//			if newOnclause != nil {
 			//				node.SetOnclause(newOnclause)
 			//			}
-			if useCBO && (cost > 0.0) && (cardinality > 0.0) && (selec > 0.0) && (filter != nil) {
+			if useCBO && (cost > 0.0) && (cumCost > 0.0) && (cardinality > 0.0) && (selec > 0.0) && (filter != nil) {
 				selec = this.adjustForIndexFilters(right.Alias(), origOnclause, selec)
-				cost, cardinality = getSimpleFilterCost(cost, cardinality, selec)
+				cost, cumCost, cardinality = getSimpleFilterCost(cost, cumCost, cardinality, selec)
 			}
-			cumCost := leftPlan.GetCumCost() + cost
+			//cumCost := leftPlan.GetCumCost() + cost
 			return plan.NewNLJoinJE(plan.NewSequence(scans.GetPlan()...), false /*for now */, newOnclause, right.Alias(), newFilter, cost, cumCost, joinCardinality), nil, probePlan /*.GetPlan()*/, nil
 		} else if err != nil { //&& useCBO {
 			// error occurred and neither nested-loop join nor hash join is available
@@ -517,12 +528,14 @@ func (this *builder) BuildJoin(right algebra.SimpleFromTerm, onClause []expressi
 		newKeyspaceTerm.SetProperty(right.Property())
 		newKeyspaceTerm.SetJoinKeys(primaryJoinKeys)
 		cost = OPT_COST_NOT_AVAIL
+		cumCost = OPT_COST_NOT_AVAIL
 		cardinality = OPT_CARD_NOT_AVAIL
 		if this.useCBO {
-			cost, cardinality = getLookupJoinCost2(rightPlan.GetLastOp(), false, /*node.Outer(), */
-				newKeyspaceTerm, this.baseKeyspaces[right.Alias()])
+			cost, cumCost, cardinality = getLookupJoinCost2(rightPlan.GetLastOp(), false, /*node.Outer(), */
+				newKeyspaceTerm, leftPlan.GetFullyQualBaseKeyspaceNames(), rightPlan.GetFullyQualBaseKeyspaceNames()[0])
 		}
-		cumCost := leftPlan.GetCumCost() + cost
+
+		//cumCost := leftPlan.GetCumCost() + cost
 		return nil, plan.NewJoinFromAnsiJE(keyspace, newKeyspaceTerm, false /*node.Outer(), */, cost, cumCost, cardinality), probePlan, nil
 	case *algebra.ExpressionTerm, *algebra.SubqueryTerm:
 		//		err := this.processOnclause(right.Alias(), andedOnClause, node.Outer(), node.Pushable())
@@ -535,7 +548,7 @@ func (this *builder) BuildJoin(right algebra.SimpleFromTerm, onClause []expressi
 			return nil, nil, nil, err
 		}
 
-		scans, probePlan, newOnclause, cost, cardinality, err := this.constructAnsiJoinSimpleFromTerm(right, leftPlan, rightPlan, joinCardinality, andedOnClause)
+		scans, probePlan, newOnclause, cost, cumCost, cardinality, err := this.constructAnsiJoinSimpleFromTerm(right, leftPlan, rightPlan, joinCardinality, andedOnClause)
 		if err != nil {
 			return nil, nil, nil, err
 		}
@@ -544,10 +557,10 @@ func (this *builder) BuildJoin(right algebra.SimpleFromTerm, onClause []expressi
 		//			node.SetOnclause(newOnclause)
 		//		}
 
-		if useCBO && (cost > 0.0) && (cardinality > 0.0) && (selec > 0.0) && (filter != nil) {
-			cost, cardinality = getSimpleFilterCost(cost, cardinality, selec)
+		if useCBO && (cost > 0.0) && (cumCost > 0.0) && (cardinality > 0.0) && (selec > 0.0) && (filter != nil) {
+			cost, cumCost, cardinality = getSimpleFilterCost(cost, cumCost, cardinality, selec)
 		}
-		cumCost := leftPlan.GetCumCost() + cost
+		//cumCost := leftPlan.GetCumCost() + cost
 		return plan.NewNLJoinJE(plan.NewSequence(scans.GetPlan()...), false /*for now */, newOnclause, right.Alias(), filter, cost, cumCost, joinCardinality), nil, probePlan, nil
 	default:
 		return nil, nil, nil, errors.NewPlanInternalError(fmt.Sprintf("buildAnsiJoin: Unexpected right-hand side node type"))

@@ -133,8 +133,8 @@ func (this *NLJoin) MarshalBase(f func(map[string]interface{})) map[string]inter
 		r["filter"] = expression.NewStringer().Visit(this.filter)
 	}
 
-	if this.cost > 0.0 {
-		r["cost"] = this.cost
+	if this.Cost() > 0.0 {
+		r["cost"] = this.Cost()
 	}
 
 	if this.cardinality > 0.0 {

@@ -361,7 +361,7 @@ func (this *builder) VisitExpressionTerm(node *algebra.ExpressionTerm) (interfac
 	if this.useCBO {
 		cost, cardinality = getExpressionScanCost(node.ExpressionTerm(), this.keyspaceNames)
 		if (filter != nil) && (cost > 0.0) && (cardinality > 0.0) && (selec > 0.0) {
-			cost, cardinality = getSimpleFilterCost(cost, cardinality, selec)
+			cost, _, cardinality = getSimpleFilterCost(cost, 0, cardinality, selec)
 		}
 	}
 	this.addChildren(plan.NewExpressionScan(node.ExpressionTerm(), node.Alias(), node.IsCorrelated(), filter, cost, cardinality))
@@ -644,7 +644,7 @@ func (this *builder) VisitUnnest(node *algebra.Unnest) (interface{}, error) {
 		if this.useCBO {
 			cost, cardinality = getUnnestCost(node, this.lastOp, this.keyspaceNames, this.advisorValidate())
 			if (filter != nil) && (cost > 0.0) && (cardinality > 0.0) && (selec > 0.0) {
-				cost, cardinality = getSimpleFilterCost(cost, cardinality, selec)
+				cost, _, cardinality = getSimpleFilterCost(cost, 0, cardinality, selec)
 			}
 		}
 		this.addSubChildren(plan.NewUnnest(node, filter, cost, cardinality))
@@ -846,7 +846,7 @@ func (this *builder) getIndexFilter(index datastore.Index, alias string, sargSpa
 	baseKeyspace.Filters().ClearIndexFlag()
 
 	if this.useCBO && (filter != nil) && (cost > 0.0) && (cardinality > 0.0) && (selec > 0.0) {
-		cost, cardinality = getSimpleFilterCost(cost, cardinality, selec)
+		cost, _, cardinality = getSimpleFilterCost(cost, 0, cardinality, selec)
 	}
 	return filter, cost, cardinality, nil
 }

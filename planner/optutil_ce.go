@@ -109,13 +109,14 @@ func getHashJoinCost(left, right plan.Operator, buildExprs, probeExprs expressio
 	return OPT_COST_NOT_AVAIL, OPT_CARD_NOT_AVAIL, false
 }
 
-func getNLJoinCost2(left, right plan.Operator, joinCardinality float64, outer bool, op string) (float64, float64) {
-	return OPT_COST_NOT_AVAIL, OPT_CARD_NOT_AVAIL
+func getNLJoinCost2(left, right plan.Operator, joinCardinality float64, leftKeyspaces []string, rightKeyspace string,
+	outer bool, op string) (float64, float64, float64) {
+	return OPT_COST_NOT_AVAIL, OPT_COST_NOT_AVAIL, OPT_CARD_NOT_AVAIL
 }
 
 func getHashJoinCost2(left, right plan.Operator, buildExprs, probeExprs expression.Expressions,
-	joinCardinality float64, buildRight, force bool, outer bool, op string) (float64, float64, bool) {
-	return OPT_COST_NOT_AVAIL, OPT_CARD_NOT_AVAIL, false
+	joinCardinality float64, leftKeyspaces []string, rightKeyspace string, buildRight, force bool, outer bool, op string) (float64, float64, float64, bool) {
+	return OPT_COST_NOT_AVAIL, OPT_COST_NOT_AVAIL, OPT_CARD_NOT_AVAIL, false
 }
 
 func getLookupJoinCost(left plan.Operator, outer bool, right *algebra.KeyspaceTerm,
@@ -124,8 +125,8 @@ func getLookupJoinCost(left plan.Operator, outer bool, right *algebra.KeyspaceTe
 }
 
 func getLookupJoinCost2(left plan.Operator, outer bool, right *algebra.KeyspaceTerm,
-	rightKeyspace *base.BaseKeyspace) (float64, float64) {
-	return OPT_COST_NOT_AVAIL, OPT_CARD_NOT_AVAIL
+	leftKeyspaces []string, rightKeyspace string) (float64, float64, float64) {
+	return OPT_COST_NOT_AVAIL, OPT_COST_NOT_AVAIL, OPT_CARD_NOT_AVAIL
 }
 
 func getIndexJoinCost(left plan.Operator, outer bool, right *algebra.KeyspaceTerm,
@@ -153,12 +154,12 @@ func getSimpleFromTermCost(left, right plan.Operator, filters base.Filters) (flo
 	return OPT_COST_NOT_AVAIL, OPT_CARD_NOT_AVAIL
 }
 
-func getSimpleFromTermCost2(left, right plan.Operator, joinCardinality float64, filters base.Filters) (float64, float64) {
-	return OPT_COST_NOT_AVAIL, OPT_CARD_NOT_AVAIL
+func getSimpleFromTermCost2(left, right plan.Operator, joinCardinality float64) (float64, float64, float64) {
+	return OPT_COST_NOT_AVAIL, OPT_COST_NOT_AVAIL, OPT_CARD_NOT_AVAIL
 }
 
-func getSimpleFilterCost(cost, cardinality, selec float64) (float64, float64) {
-	return OPT_COST_NOT_AVAIL, OPT_CARD_NOT_AVAIL
+func getSimpleFilterCost(cost, cumCost, cardinality, selec float64) (float64, float64, float64) {
+	return OPT_COST_NOT_AVAIL, OPT_COST_NOT_AVAIL, OPT_CARD_NOT_AVAIL
 }
 
 func getFilterCost(lastOp plan.Operator, expr expression.Expression,

@@ -112,8 +112,8 @@ func (this *Join) MarshalBase(f func(map[string]interface{})) map[string]interfa
 		r["as"] = this.term.As()
 	}
 
-	if this.cost > 0.0 {
-		r["cost"] = this.cost
+	if this.Cost() > 0.0 {
+		r["cost"] = this.Cost()
 	}
 	if this.cardinality > 0.0 {
 		r["cardinality"] = this.cardinality
