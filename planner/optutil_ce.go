@@ -167,6 +167,11 @@ func getFilterCost(lastOp plan.Operator, expr expression.Expression,
 	return OPT_COST_NOT_AVAIL, OPT_CARD_NOT_AVAIL
 }
 
+func getFilterCost2(lastOp plan.Operator, expr expression.Expression,
+	baseKeyspaces map[string]*base.BaseKeyspace, keyspaceNames map[string]string, advisorValidate bool) (float64, float64) {
+	return OPT_COST_NOT_AVAIL, OPT_CARD_NOT_AVAIL
+}
+
 func getFilterCostWithInput(expr expression.Expression, baseKeyspaces map[string]*base.BaseKeyspace,
 	keyspaceNames map[string]string, cost, cardinality float64, advisorValidate bool) (float64, float64) {
 	return OPT_COST_NOT_AVAIL, OPT_CARD_NOT_AVAIL

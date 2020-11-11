@@ -359,10 +359,16 @@ func (this *builder) addLetAndPredicate(let expression.Bindings, pred expression
 		this.addSubChildren(plan.NewLet(let, cost, cardinality))
 	}
 
+	optimizer := this.context.Optimizer()
 	if pred != nil {
 		if this.useCBO {
-			cost, cardinality = getFilterCost(this.lastOp, pred, this.baseKeyspaces,
-				this.keyspaceNames, advisorValidate)
+			if optimizer != nil && optimizer.DoJoinEnumeration() == true {
+				cost, cardinality = getFilterCost2(this.lastOp, pred, this.baseKeyspaces,
+					this.keyspaceNames, advisorValidate)
+			} else {
+				cost, cardinality = getFilterCost(this.lastOp, pred, this.baseKeyspaces,
+					this.keyspaceNames, advisorValidate)
+			}
 		}
 		this.addSubChildren(plan.NewFilter(pred, cost, cardinality))
 	}

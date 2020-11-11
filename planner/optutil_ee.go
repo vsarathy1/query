@@ -271,6 +271,12 @@ func getFilterCost(lastOp plan.Operator, expr expression.Expression,
 	return optutil.CalcFilterCost(lastOp, expr, baseKeyspaces, keyspaceNames, advisorValidate)
 }
 
+func getFilterCost2(lastOp plan.Operator, expr expression.Expression,
+	baseKeyspaces map[string]*base.BaseKeyspace, keyspaceNames map[string]string, advisorValidate bool) (float64, float64) {
+
+	return optutil.CalcFilterCost2(lastOp, expr, baseKeyspaces, keyspaceNames, advisorValidate)
+}
+
 func getFilterCostWithInput(expr expression.Expression, baseKeyspaces map[string]*base.BaseKeyspace,
 	keyspaceNames map[string]string, cost, cardinality float64, advisorValidate bool) (float64, float64) {
 	return optutil.CalcFilterCostWithInput(expr, baseKeyspaces, keyspaceNames, cost, cardinality, advisorValidate)
