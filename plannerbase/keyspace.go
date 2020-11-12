@@ -24,6 +24,7 @@ const (
 type BaseKeyspace struct {
 	name        string
 	keyspace    string
+	seqNum      uint32
 	cardinality float64
 	filters     Filters
 	joinfilters Filters
@@ -96,6 +97,14 @@ func (this *BaseKeyspace) SetCardinality(card float64) {
 	this.cardinality = card
 }
 
+func (this *BaseKeyspace) GetSeqNum() uint32 {
+	return this.seqNum
+}
+
+func (this *BaseKeyspace) SetSeqNum(seqNum uint32) {
+	this.seqNum = seqNum
+}
+
 func CopyBaseKeyspaces(src map[string]*BaseKeyspace) map[string]*BaseKeyspace {
 	return copyBaseKeyspaces(src, false)
 }
@@ -113,6 +122,7 @@ func copyBaseKeyspaces(src map[string]*BaseKeyspace, copyFilter bool) map[string
 			keyspace:   kspace.keyspace,
 			ksFlags:    kspace.ksFlags,
 			outerlevel: kspace.outerlevel,
+			seqNum:     kspace.seqNum,
 		}
 		if len(kspace.unnests) > 0 {
 			dest[kspace.name].unnests = make(map[string]string, len(kspace.unnests))

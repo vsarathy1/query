@@ -24,6 +24,7 @@ type keyspaceFinder struct {
 	keyspaceMap        map[string]string
 	simpleFromTermsMap map[string]algebra.SimpleFromTerm
 	outerlevel         int32
+	seqNum             uint32
 	pushableOnclause   expression.Expression
 	unnestDepends      map[string]*expression.Identifier
 }
@@ -44,8 +45,10 @@ func (this *keyspaceFinder) addKeyspaceAlias(alias string, path *algebra.Path, n
 	if _, ok := this.baseKeyspaces[alias]; ok {
 		return errors.NewPlanInternalError(fmt.Sprintf("addKeyspaceAlias: duplicate keyspace %s", alias))
 	}
+	this.seqNum++
 	newBaseKeyspace := base.NewBaseKeyspace(alias, path)
 	newBaseKeyspace.SetOuterlevel(this.outerlevel)
+	newBaseKeyspace.SetSeqNum(this.seqNum)
 	this.baseKeyspaces[alias] = newBaseKeyspace
 	this.keyspaceMap[alias] = newBaseKeyspace.Keyspace()
 	this.simpleFromTermsMap[alias] = node
