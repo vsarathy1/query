@@ -45,11 +45,15 @@ func (this *internalOutput) CloseResults() {
 }
 
 func (this *internalOutput) Abort(err errors.Error) {
-	// empty
+	if this.err == nil {
+		this.err = err
+	}
 }
 
 func (this *internalOutput) Fatal(err errors.Error) {
-	// empty
+	if this.err == nil {
+		this.err = err
+	}
 }
 
 func (this *internalOutput) Error(err errors.Error) {
@@ -162,17 +166,18 @@ func (this *Context) PrepareStatement(statement string, namedArgs map[string]val
 		return nil, false, errors.NewRewriteError(err, "")
 	}
 
-	semChecker := semantics.NewSemChecker(true /* FIXME */, stmt.Type(), this.GetTxContext() != nil)
+	semChecker := semantics.NewSemChecker(true /* FIXME */, stmt.Type(), this.TxContext() != nil)
 	_, err = stmt.Accept(semChecker)
 	if err != nil {
 		return nil, false, err
 	}
 
-	_, isPrepare := stmt.(*algebra.Prepare)
-
-	if isPrepare {
-		namedArgs = nil
-		positionalArgs = nil
+	switch st := stmt.(type) {
+	case *algebra.Prepare:
+		prepContext.SetNamedArgs(nil)
+		prepContext.SetPositionalArgs(nil)
+	case *algebra.Advise:
+		st.SetContext(this)
 	}
 
 	//  monitoring code TBD
@@ -323,7 +328,7 @@ func (this *Context) ExecuteTranStatement(stmtType string, stmtAtomicity bool) (
 			}
 		}
 		if txId == "" {
-			return "", nil, errors.NewStartTransactionError(fmt.Errorf("Implicit Transaction"))
+			return "", nil, errors.NewStartTransactionError(fmt.Errorf("Implicit Transaction"), nil)
 		}
 	}
 
@@ -355,7 +360,7 @@ func (this *Context) DoStatementComplete(stmtType string, success bool) (err err
 
 		_, _, err = this.ExecuteTranStatement(tranStmt, !this.txImplicit)
 		if err != nil && tranStmt == "COMMIT" && this.txContext != nil {
-			_, _, err = this.ExecuteTranStatement("ROLLBACK", !this.txImplicit)
+			this.ExecuteTranStatement("ROLLBACK", !this.txImplicit)
 		}
 
 		if this.txContext != nil {

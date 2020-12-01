@@ -275,7 +275,19 @@ func NewIndexNotInMemory(msg string) Error {
 
 func NewMissingSystemCBOStatsError() Error {
 	return &err{level: EXCEPTION, ICode: 5400, IKey: "execution.update_statistics.missing_system_cbostats",
-		InternalMsg:    "System Collection 'N1QL_CBO_STATS' is required for UPDATE STATISTICS",
+		InternalMsg:    "System Collection 'N1QL_CBO_STATS' is required for UPDATE STATISTICS (ANALYZE)",
+		InternalCaller: CallerN(1)}
+}
+
+func NewInvalidIndexNameError(name interface{}, ikey string) Error {
+	return &err{level: EXCEPTION, ICode: 5410, IKey: ikey,
+		InternalMsg:    fmt.Sprintf("index name(%v) must be a string", name),
+		InternalCaller: CallerN(1)}
+}
+
+func NewIndexNotFoundError(name string, ikey string, e error) Error {
+	return &err{level: EXCEPTION, ICode: 5411, IKey: ikey, ICause: e,
+		InternalMsg:    fmt.Sprintf("index %s is not found", name),
 		InternalCaller: CallerN(1)}
 }
 

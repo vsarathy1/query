@@ -11,6 +11,7 @@ package semantics
 
 import (
 	"github.com/couchbase/query/algebra"
+	"github.com/couchbase/query/datastore"
 	"github.com/couchbase/query/errors"
 )
 
@@ -53,6 +54,10 @@ func (this *SemChecker) VisitInferKeyspace(stmt *algebra.InferKeyspace) (interfa
 func (this *SemChecker) VisitUpdateStatistics(stmt *algebra.UpdateStatistics) (interface{}, error) {
 	if !this.hasSemFlag(_SEM_ENTERPRISE) {
 		return nil, errors.NewEnterpriseFeature("Update Statistics", "semantics.visit_update_statistics")
+	}
+	if len(stmt.Indexes()) > 0 &&
+		(stmt.Using() != datastore.GSI && stmt.Using() != datastore.DEFAULT) {
+		return nil, errors.NewUpdateStatInvalidIndexTypeError()
 	}
 	return nil, stmt.MapExpressions(this)
 }

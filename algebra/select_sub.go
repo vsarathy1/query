@@ -49,7 +49,7 @@ func NewSubselect(with expression.Bindings, from FromTerm, let expression.Bindin
 		group:      group,
 		projection: projection,
 		window:     window,
-		correlated: false}
+	}
 }
 
 /*

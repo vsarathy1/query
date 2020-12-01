@@ -144,7 +144,7 @@ outer:
 			entry := indexes[c]
 			if entry.cost <= 0.0 {
 				cost, _, card, e := indexScanCost(entry.index, entry.sargKeys, this.context.RequestId(),
-					entry.spans, node.Alias(), this.advisorValidate())
+					entry.spans, node.Alias(), this.advisorValidate(), this.context)
 				if e != nil || (cost <= 0.0 || card <= 0.0) {
 					useCBO = false
 				} else {
@@ -442,12 +442,7 @@ func indexCoverExpressions(entry *indexEntry, keys expression.Expressions, pred,
 
 	// Allow array indexes to cover ANY predicates
 	if pred != nil && entry.exactSpans && indexHasArrayIndexKey(entry.index) {
-		sargKeysHasArray := false
-		for _, sk := range entry.sargKeys {
-			if sargKeysHasArray, _ = sk.IsArrayIndexKey(); sargKeysHasArray {
-				break
-			}
-		}
+		sargKeysHasArray := hasArrayIndexKey(entry.sargKeys)
 
 		if _, ok := entry.spans.(*IntersectSpans); !ok && sargKeysHasArray {
 			covers, err := CoversFor(pred, origPred, keys)

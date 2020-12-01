@@ -17,6 +17,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/couchbase/query/auth"
 	"github.com/couchbase/query/distributed"
 	"github.com/couchbase/query/errors"
 	"github.com/couchbase/query/scheduler"
@@ -76,10 +77,35 @@ func (this *Advisor) Indexable() bool {
 	return false
 }
 
+func (this *Advisor) Privileges() *auth.Privileges {
+	// For session management user must have priviledge to
+	// access system keyspaces.
+	// Priledges for underlying statements are checked at
+	// the time of the ADVISE statement
+	privs := auth.NewPrivileges()
+	if this.isSession() {
+		privs.Add("", auth.PRIV_SYSTEM_READ, auth.PRIV_PROPS_NONE)
+	}
+	return privs
+}
+
+func (this *Advisor) isSession() bool {
+	arg := this.operands[0].Value()
+	if arg != nil && arg.Type() == value.OBJECT {
+		actual := arg.Actual().(map[string]interface{})
+		if _, ok := actual["action"]; ok {
+			return true
+		}
+	}
+	return false
+}
+
 func (this *Advisor) Apply(context Context, arg value.Value) (value.Value, error) {
 	if arg.Type() == value.MISSING {
 		return value.MISSING_VALUE, nil
 	}
+
+	context.SetAdvisor()
 
 	/*
 		Advisor({ “action” : “start”,
@@ -89,7 +115,11 @@ func (this *Advisor) Apply(context Context, arg value.Value) (value.Value, error
 		  “query_count” : 20000})
 	*/
 	if arg.Type() == value.OBJECT {
-		actual := value.NewValue(arg).Actual().(map[string]interface{})
+		err := validateSessionArgs(arg)
+		if err != nil {
+			return nil, err
+		}
+		actual := arg.Actual().(map[string]interface{})
 		val, ok := actual["action"]
 		if ok {
 			val = strings.ToLower(value.NewValue(val).Actual().(string))
@@ -160,12 +190,13 @@ func (this *Advisor) Apply(context Context, arg value.Value) (value.Value, error
 
 	stmtMap, err := this.extractStrs(arg)
 	if len(stmtMap) == 0 || err != nil {
-		return value.EMPTY_ARRAY_VALUE, err
+		return value.EMPTY_ARRAY_VALUE, nil
 	}
 
-	curMap := make(map[string]*mapEntry, 1)
-	recIdxMap := make(map[string]*mapEntry, 1)
-	recCidxMap := make(map[string]*mapEntry, 1)
+	curMap := make(map[string]*mapEntry, len(stmtMap))
+	recIdxMap := make(map[string]*mapEntry, len(stmtMap))
+	recCidxMap := make(map[string]*mapEntry, len(stmtMap))
+	errs := make([]*adviseError, 0, len(stmtMap))
 	for _, v := range stmtMap {
 		newContext := context.(Context)
 		if v.queryContext != "" {
@@ -174,18 +205,20 @@ func (this *Advisor) Apply(context Context, arg value.Value) (value.Value, error
 		r, _, err := newContext.EvaluateStatement(addPrefix(v.stmt, "advise "),
 			nil, nil, false, true)
 
-		if err == nil {
+		if err != nil {
+			errs = append(errs, NewAdviseError(err, v))
+		} else {
 			this.processResult(v, r, curMap, recIdxMap, recCidxMap)
 		}
 	}
 
-	r := NewReport(curMap, recIdxMap, recCidxMap)
+	r := NewReport(curMap, recIdxMap, recCidxMap, errs)
 	bytes, err := r.MarshalJSON()
-	if err == nil {
-		return value.NewValue(bytes), nil
+	if err != nil {
+		return value.EMPTY_ARRAY_VALUE, nil
 	}
 
-	return nil, nil
+	return value.NewValue(bytes), nil
 }
 
 func (this *Advisor) scheduleTask(sessionName string, duration time.Duration, context Context, settings map[string]interface{}, query string) error {
@@ -224,6 +257,7 @@ func analyzeWorkload(profile, response_limit string, delta, query_count float64)
 		workload += "str_to_duration(elapsedTime)/1000000 > " + response_limit + " and "
 	}
 
+	workload += "phaseOperators.advisor is missing and "
 	workload += "requestTime between \"" + start_time + "\" and DATE_ADD_STR(\"" + start_time + "\", " + strconv.FormatFloat(delta, 'f', 0, 64) + ",\"second\") "
 	workload += "order by requestTime limit " + strconv.FormatFloat(query_count, 'f', 0, 64)
 	return "SELECT RAW Advisor((" + workload + "))"
@@ -232,10 +266,10 @@ func analyzeWorkload(profile, response_limit string, delta, query_count float64)
 func getResults(sessionName string, context Context) (value.Value, error) {
 	query := "select raw results from system:tasks_cache where class = \"" + _CLASS + "\"  and name = \"" + sessionName + "\" and ANY v in results satisfies v <> {} END"
 	r, _, err := context.(Context).EvaluateStatement(query, nil, nil, false, true)
-	if err == nil {
-		return value.NewValue(r), nil
+	if err != nil {
+		return nil, err
 	}
-	return nil, err
+	return value.NewValue(r), nil
 }
 
 func purgeResults(sessionName string, context Context, analysis bool) (value.Value, error) {
@@ -257,10 +291,35 @@ func purgeResults(sessionName string, context Context, analysis bool) (value.Val
 func listSessions(status string, context Context) (value.Value, error) {
 	query := "select * from system:tasks_cache where class = \"" + _CLASS + "\"" + queryDict()(status)
 	r, _, err := context.(Context).EvaluateStatement(query, nil, nil, false, true)
-	if err == nil {
-		return value.NewValue(r), nil
+	if err != nil {
+		return nil, err
 	}
-	return nil, err
+	return value.NewValue(r), nil
+}
+
+func validateSessionArgs(arg value.Value) error {
+	if arg == nil {
+		return nil
+	}
+
+	invalidNames := make([]string, 0, 8)
+	for fieldName, _ := range arg.Fields() {
+		if !strings.EqualFold(fieldName, "action") &&
+			!strings.EqualFold(fieldName, "profile") &&
+			!strings.EqualFold(fieldName, "response") &&
+			!strings.EqualFold(fieldName, "duration") &&
+			!strings.EqualFold(fieldName, "query_count") &&
+			!strings.EqualFold(fieldName, "status") &&
+			!strings.EqualFold(fieldName, "session") {
+			invalidNames = append(invalidNames, fieldName)
+		}
+	}
+
+	if len(invalidNames) > 0 {
+		return fmt.Errorf("Invalid arguments to Advisor() function: %v", invalidNames)
+	}
+
+	return nil
 }
 
 func getSettings(profile, tag, response_limit string, query_count float64, numberOfNodes int, start bool) map[string]interface{} {
@@ -270,7 +329,7 @@ func getSettings(profile, tag, response_limit string, query_count float64, numbe
 	if numberOfNodes == 0 {
 		numberOfNodes = 1
 	}
-	countPerNode := int(query_count / float64(numberOfNodes))
+	countPerNode := int64(query_count / float64(numberOfNodes))
 	if countPerNode > _MAXCNTPERNODE {
 		countPerNode = _MAXCNTPERNODE
 	}
@@ -490,7 +549,7 @@ func (this *Advisor) extractStrs(arg value.Value) (map[string]*queryObject, erro
 							}
 						}
 
-						if _, ok := m[key]; ok {
+						if _, ok := entryMap[key]; ok {
 							entryMap[key].addOne()
 						} else {
 							entryMap[key] = NewQueryObject(str, qc, 1)
@@ -641,9 +700,12 @@ func (this *indexMap) MarshalJSON() ([]byte, error) {
 
 func (this *indexMap) MarshalBase(f func(map[string]interface{})) map[string]interface{} {
 	r := map[string]interface{}{
-		"index":             this.index,
-		"update_statistics": this.updStats,
-		"statements":        this.queries,
+		"index":      this.index,
+		"statements": this.queries,
+	}
+
+	if this.updStats != "" {
+		r["update_statistics"] = this.updStats
 	}
 
 	if f != nil {
@@ -665,7 +727,9 @@ func (this *indexMap) UnmarshalJSON(body []byte) error {
 	}
 
 	this.index = _unmarshalled.Index
-	this.updStats = _unmarshalled.UpdStats
+	if _unmarshalled.UpdStats != "" {
+		this.updStats = _unmarshalled.UpdStats
+	}
 
 	ql := NewQueryList()
 	for _, v1 := range _unmarshalled.Queries {
@@ -691,17 +755,31 @@ func NewIndexMaps(m map[string]*mapEntry) indexMaps {
 	return ims
 }
 
+type adviseError struct {
+	err   error
+	query *queryObject
+}
+
+func NewAdviseError(err error, query *queryObject) *adviseError {
+	return &adviseError{
+		err:   err,
+		query: query,
+	}
+}
+
 type report struct {
 	currentIdxs    indexMaps
 	recommendIdxs  indexMaps
 	recommendCidxs indexMaps
+	errors         []*adviseError
 }
 
-func NewReport(current, recIdxs, redCidxs map[string]*mapEntry) *report {
+func NewReport(current, recIdxs, redCidxs map[string]*mapEntry, errors []*adviseError) *report {
 	return &report{
 		currentIdxs:    NewIndexMaps(current),
 		recommendIdxs:  NewIndexMaps(recIdxs),
 		recommendCidxs: NewIndexMaps(redCidxs),
+		errors:         errors,
 	}
 }
 
@@ -724,6 +802,26 @@ func (this *report) MarshalBase(f func(map[string]interface{})) map[string]inter
 		r["recommended_covering_indexes"] = this.recommendCidxs
 	}
 
+	if len(this.errors) > 0 {
+		errs := make([]interface{}, 0, len(this.errors))
+		for _, e := range this.errors {
+			if e == nil {
+				continue
+			}
+			ae := make(map[string]interface{}, 4)
+			ae["error"] = e.err.Error()
+			ae["statement"] = e.query.stmt
+			ae["run_count"] = e.query.cnt
+			if e.query.queryContext != "" {
+				ae["query_context"] = e.query.queryContext
+			}
+			errs = append(errs, ae)
+		}
+		if len(errs) > 0 {
+			r["errors"] = errs
+		}
+	}
+
 	if f != nil {
 		f(r)
 	}
@@ -735,6 +833,12 @@ func (this *report) UnmarshalJSON(body []byte) error {
 		CurIdxes []json.RawMessage `json:"current_used_indexes"`
 		RecIdexs []json.RawMessage `json:"recommended_indexes"`
 		RecCidxs []json.RawMessage `json:"recommended_covering_indexes"`
+		Errors   []struct {
+			Error   string `json:"error"`
+			Stmt    string `json:"statement"`
+			Cnt     int    `json:"run_count"`
+			Context string `json:"query_context"`
+		} `json:"errors"`
 	}
 
 	err := json.Unmarshal(body, &_unmarshalled)
@@ -768,5 +872,15 @@ func (this *report) UnmarshalJSON(body []byte) error {
 			this.recommendCidxs = append(this.recommendCidxs, r)
 		}
 	}
+
+	if len(_unmarshalled.Errors) > 0 {
+		this.errors = make([]*adviseError, 0, len(_unmarshalled.Errors))
+		for _, e := range _unmarshalled.Errors {
+			q := NewQueryObject(e.Stmt, e.Context, e.Cnt)
+			ae := NewAdviseError(fmt.Errorf(e.Error), q)
+			this.errors = append(this.errors, ae)
+		}
+	}
+
 	return nil
 }

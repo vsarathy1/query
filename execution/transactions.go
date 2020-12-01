@@ -89,8 +89,7 @@ func (this *StartTransaction) RunOnce(context *Context, parent value.Value) {
 		}
 
 		consistency := context.consistency
-		if !context.txImplicit &&
-			(context.originalConsistency == datastore.NOT_SET || context.originalConsistency == datastore.AT_PLUS) {
+		if context.originalConsistency == datastore.NOT_SET || context.originalConsistency == datastore.AT_PLUS {
 			consistency = datastore.SCAN_PLUS
 		}
 
@@ -100,11 +99,11 @@ func (this *StartTransaction) RunOnce(context *Context, parent value.Value) {
 		}
 
 		context.txContext = transactions.NewTxContext(context.txImplicit, txData, context.txTimeout,
-			context.durabilityTimeout, durabilityLevel, this.plan.IsolationLevel(),
-			consistency)
+			context.durabilityTimeout, context.kvTimeout, durabilityLevel, this.plan.IsolationLevel(),
+			consistency, context.atrCollection, context.numAtrs)
 
 		if context.txContext == nil {
-			err = errors.NewStartTransactionError(fmt.Errorf("txcontext allocation"))
+			err = errors.NewStartTransactionError(fmt.Errorf("txcontext allocation"), nil)
 			return
 		}
 
@@ -122,7 +121,7 @@ func (this *StartTransaction) RunOnce(context *Context, parent value.Value) {
 		sv := value.NewScopeValue(make(map[string]interface{}, 2), parent)
 		sv.SetField("txid", context.txContext.TxId())
 		if !this.sendItem(value.NewAnnotatedValue(sv)) {
-			err = errors.NewStartTransactionError(fmt.Errorf("sendItem"))
+			err = errors.NewStartTransactionError(fmt.Errorf("sendItem"), nil)
 			return
 		}
 	})

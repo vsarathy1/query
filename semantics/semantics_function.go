@@ -14,7 +14,6 @@ import (
 	"strings"
 
 	"github.com/couchbase/query/algebra"
-	"github.com/couchbase/query/distributed"
 	"github.com/couchbase/query/errors"
 	"github.com/couchbase/query/expression"
 	"github.com/couchbase/query/expression/search"
@@ -49,12 +48,18 @@ func (this *SemChecker) visitSearchFunction(search *search.Search) (err error) {
 }
 
 func (this *SemChecker) visitAdvisorFunction(advisor *expression.Advisor) (err error) {
+	if !this.hasSemFlag(_SEM_ENTERPRISE) {
+		return errors.NewEnterpriseFeature("Advisor Function", "semantics.visit_advisor_function")
+	}
+
+	if !this.hasSemFlag(_SEM_PROJECTION) {
+		return errors.NewAdvisorProjOnly()
+	}
+
 	if this.hasSemFlag(_SEM_TRANSACTION) {
 		return errors.NewTranFunctionNotSupportedError(advisor.Name())
 	}
 
-	if !distributed.RemoteAccess().Enabled(distributed.NEW_INDEXADVISOR) {
-		return errors.NewMHDPOnlyFeature("Advisor Function", "semantics.visit_advise")
-	}
+	this.setSemFlag(_SEM_ADVISOR_FUNC)
 	return nil
 }

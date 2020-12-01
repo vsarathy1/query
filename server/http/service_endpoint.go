@@ -117,7 +117,6 @@ func (this *HttpEndpoint) Listen() error {
 	srv := &http.Server{
 		Handler:           this.mux,
 		ReadHeaderTimeout: 5 * time.Second,
-		//			ReadTimeout:       30 * time.Second,
 	}
 
 	for i, netW := range getNetwProtocol() {
@@ -182,15 +181,14 @@ func (this *HttpEndpoint) ListenTLS() error {
 	http2Srv := http.Server{TLSConfig: cfg}
 	err2 := http2.ConfigureServer(&http2Srv, nil)
 	if err2 != nil {
-		return fmt.Errorf(" Error configuring http2, err: %v", err2)
+		logging.Errorf(" Error configuring http2, err: %v", err2)
+	} else {
+		cfg = http2Srv.TLSConfig
 	}
-
-	cfg = http2Srv.TLSConfig
 
 	srv := &http.Server{
 		Handler:           this.mux,
 		ReadHeaderTimeout: 5 * time.Second,
-		//			ReadTimeout:       30 * time.Second,
 	}
 
 	/*

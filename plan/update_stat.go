@@ -26,7 +26,8 @@ type UpdateStatistics struct {
 	node     *algebra.UpdateStatistics
 }
 
-func NewUpdateStatistics(keyspace datastore.Keyspace, node *algebra.UpdateStatistics) *UpdateStatistics {
+func NewUpdateStatistics(keyspace datastore.Keyspace,
+	node *algebra.UpdateStatistics) *UpdateStatistics {
 	return &UpdateStatistics{
 		keyspace: keyspace,
 		node:     node,
@@ -57,11 +58,24 @@ func (this *UpdateStatistics) MarshalBase(f func(map[string]interface{})) map[st
 	r := map[string]interface{}{"#operator": "UpdateStatistics"}
 	this.node.Keyspace().MarshalKeyspace(r)
 
-	terms := make([]interface{}, 0, len(this.node.Terms()))
-	for _, term := range this.node.Terms() {
-		terms = append(terms, expression.NewStringer().Visit(term))
+	if len(this.node.Terms()) > 0 {
+		terms := make([]interface{}, 0, len(this.node.Terms()))
+		for _, term := range this.node.Terms() {
+			terms = append(terms, expression.NewStringer().Visit(term))
+		}
+		r["terms"] = terms
 	}
-	r["terms"] = terms
+	if len(this.node.Indexes()) > 0 {
+		indexes := make([]interface{}, 0, len(this.node.Indexes()))
+		for _, index := range this.node.Indexes() {
+			indexes = append(indexes, expression.NewStringer().Visit(index))
+		}
+		r["indexes"] = indexes
+		r["using"] = this.node.Using()
+	}
+	if this.node.Delete() {
+		r["delete"] = this.node.Delete()
+	}
 	if this.node.With() != nil {
 		r["with"] = this.node.With()
 	}
@@ -74,13 +88,16 @@ func (this *UpdateStatistics) MarshalBase(f func(map[string]interface{})) map[st
 
 func (this *UpdateStatistics) UnmarshalJSON(body []byte) error {
 	var _unmarshalled struct {
-		_         string          `json:"#operator"`
-		Namespace string          `json:"namespace"`
-		Bucket    string          `json:"bucket"`
-		Scope     string          `json:"scope"`
-		Keyspace  string          `json:"keyspace"`
-		Terms     []string        `json:"terms"`
-		With      json.RawMessage `json:"with"`
+		_         string              `json:"#operator"`
+		Namespace string              `json:"namespace"`
+		Bucket    string              `json:"bucket"`
+		Scope     string              `json:"scope"`
+		Keyspace  string              `json:"keyspace"`
+		Terms     []string            `json:"terms"`
+		Indexes   []string            `json:"indexes"`
+		Using     datastore.IndexType `json:"using"`
+		Delete    bool                `json:"delete"`
+		With      json.RawMessage     `json:"with"`
 	}
 
 	err := json.Unmarshal(body, &_unmarshalled)
@@ -97,14 +114,30 @@ func (this *UpdateStatistics) UnmarshalJSON(body []byte) error {
 	}
 
 	var expr expression.Expression
-	terms := make(expression.Expressions, len(_unmarshalled.Terms))
+	var terms, indexes expression.Expressions
 
-	for i, term := range _unmarshalled.Terms {
-		expr, err = parser.Parse(term)
-		if err != nil {
-			return err
+	if len(_unmarshalled.Terms) > 0 {
+		terms = make(expression.Expressions, len(_unmarshalled.Terms))
+
+		for i, term := range _unmarshalled.Terms {
+			expr, err = parser.Parse(term)
+			if err != nil {
+				return err
+			}
+			terms[i] = expr
 		}
-		terms[i] = expr
+	}
+
+	if len(_unmarshalled.Indexes) > 0 {
+		indexes = make(expression.Expressions, len(_unmarshalled.Indexes))
+
+		for i, index := range _unmarshalled.Indexes {
+			expr, err = parser.Parse(index)
+			if err != nil {
+				return err
+			}
+			indexes[i] = expr
+		}
 	}
 
 	var with value.Value
@@ -112,7 +145,13 @@ func (this *UpdateStatistics) UnmarshalJSON(body []byte) error {
 		with = value.NewValue([]byte(_unmarshalled.With))
 	}
 
-	this.node = algebra.NewUpdateStatistics(ksref, terms, with)
+	if _unmarshalled.Delete {
+		this.node = algebra.NewUpdateStatisticsDelete(ksref, terms)
+	} else if len(indexes) > 0 {
+		this.node = algebra.NewUpdateStatisticsIndex(ksref, indexes, _unmarshalled.Using, with)
+	} else {
+		this.node = algebra.NewUpdateStatistics(ksref, terms, with)
+	}
 	return nil
 }
 

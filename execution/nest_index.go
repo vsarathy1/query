@@ -155,7 +155,7 @@ func (this *IndexNest) flushBatch(context *Context) bool {
 
 	fetchOk := this.joinFetch(this.plan.Keyspace(), keyCount, pairMap, context)
 
-	return fetchOk && this.nestEntries(keyCount, pairMap, this.plan.Outer(), this.plan.Term().Alias(), context)
+	return fetchOk && this.nestEntries(keyCount, pairMap, this.plan.Outer(), nil, this.plan.Term().Alias(), context)
 }
 
 func (this *IndexNest) MarshalJSON() ([]byte, error) {
@@ -167,9 +167,9 @@ func (this *IndexNest) MarshalJSON() ([]byte, error) {
 
 // send a stop
 func (this *IndexNest) SendAction(action opAction) {
-	this.baseSendAction(action)
+	rv := this.baseSendAction(action)
 	this.Lock()
-	if this.conn != nil {
+	if rv && this.conn != nil {
 		this.conn.SendStop()
 	}
 	this.Unlock()

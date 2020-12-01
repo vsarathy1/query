@@ -14,9 +14,17 @@ package plan
 import (
 	"github.com/couchbase/query/datastore"
 	"github.com/couchbase/query/errors"
+	"github.com/couchbase/query/expression"
 )
 
-func verifyIndex(index datastore.Index, indexer datastore.Indexer, prepared *Prepared) bool {
+func verifyCovers(covers expression.Covers, keyspace datastore.Keyspace) datastore.Keyspace {
+	if covers != nil {
+		return keyspace
+	}
+	return nil
+}
+
+func verifyIndex(index datastore.Index, indexer datastore.Indexer, keyspace datastore.Keyspace, prepared *Prepared) bool {
 	if indexer == nil {
 		return false
 	}
@@ -38,6 +46,10 @@ func verifyIndex(index datastore.Index, indexer datastore.Indexer, prepared *Pre
 	// amend prepared statement version so that next time we avoid checks
 	if prepared != nil {
 		prepared.addIndexer(indexer)
+		if keyspace != nil {
+			_, rv := verifyKeyspace(keyspace, prepared)
+			return rv
+		}
 	}
 	return true
 }
@@ -80,7 +92,7 @@ func verifyKeyspace(keyspace datastore.Keyspace, prepared *Prepared) (datastore.
 		meta = namespace.(datastore.KeyspaceMetadata)
 	}
 
-	if ks == nil || err != nil {
+	if ks == nil || err != nil || ks.Uid() != keyspace.Uid() {
 		return keyspace, false
 	}
 
@@ -127,7 +139,7 @@ func verifyBucket(bucket datastore.Bucket, prepared *Prepared) (datastore.Bucket
 	bkt, err = namespace.BucketById(bucket.Id())
 	meta = namespace.(datastore.KeyspaceMetadata)
 
-	if bkt == nil || err != nil {
+	if bkt == nil || err != nil || bkt.Uid() != bucket.Uid() {
 		return bucket, false
 	}
 

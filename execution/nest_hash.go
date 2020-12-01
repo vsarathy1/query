@@ -158,18 +158,15 @@ func (this *HashNest) processItem(item value.AnnotatedValue, context *Context) b
 			}
 		}
 		if context.UseRequestQuota() {
-			var stop bool
-
 			iSz := item.Size()
 			jSz := joined.Size()
 			if jSz > iSz {
-				stop = context.TrackValueSize(jSz - iSz)
+				if context.TrackValueSize(jSz - iSz) {
+					context.Error(errors.NewMemoryQuotaExceededError())
+					return false
+				}
 			} else {
-				stop = context.TrackValueSize(iSz - jSz)
-			}
-			if stop {
-				context.Error(errors.NewMemoryQuotaExceededError())
-				return false
+				context.ReleaseValueSize(iSz - jSz)
 			}
 		}
 		return this.sendItem(joined)
@@ -203,9 +200,9 @@ func (this *HashNest) MarshalJSON() ([]byte, error) {
 }
 
 func (this *HashNest) SendAction(action opAction) {
-	this.baseSendAction(action)
+	rv := this.baseSendAction(action)
 	child := this.child
-	if child != nil {
+	if rv && child != nil {
 		child.SendAction(action)
 	}
 }

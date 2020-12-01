@@ -131,6 +131,12 @@ type Request interface {
 	SetDurabilityLevel(l datastore.DurabilityLevel)
 	DurabilityTimeout() time.Duration
 	SetDurabilityTimeout(d time.Duration)
+	KvTimeout() time.Duration
+	SetKvTimeout(d time.Duration)
+	AtrCollection() string
+	SetAtrCollection(s string)
+	NumAtrs() int
+	SetNumAtrs(n int)
 	ExecutionContext() *execution.Context
 	SetExecutionContext(ctx *execution.Context)
 	SetExecTime(time time.Time)
@@ -279,7 +285,7 @@ type BaseRequest struct {
 	aborted           bool
 	errors            []errors.Error
 	warnings          []errors.Error
-	results           sync.WaitGroup
+	stopGate          sync.WaitGroup
 	servicerGate      sync.WaitGroup
 	stopResult        chan bool          // stop consuming results
 	stopExecute       chan bool          // stop executing request
@@ -302,6 +308,9 @@ type BaseRequest struct {
 	txData            []byte
 	durabilityTimeout time.Duration
 	durabilityLevel   datastore.DurabilityLevel
+	kvTimeout         time.Duration
+	atrCollection     string
+	numAtrs           int
 	executionContext  *execution.Context
 }
 
@@ -336,7 +345,6 @@ func NewBaseRequest(rv *BaseRequest) {
 	rv.timeout = -1
 	rv.txTimeout = datastore.DEF_TXTIMEOUT
 	rv.serviceTime = time.Now()
-	rv.results.Add(1)
 	rv.state = SUBMITTED
 	rv.aborted = false
 	rv.stopResult = make(chan bool, 1)
@@ -641,8 +649,14 @@ func (this *BaseRequest) Abort(err errors.Error) {
 
 func (this *BaseRequest) Error(err errors.Error) {
 	this.Lock()
+	defer this.Unlock()
+	// don't add duplicate errors
+	for _, e := range this.errors {
+		if err.Code() != 0 && err.Code() == e.Code() && err.Error() == e.Error() {
+			return
+		}
+	}
 	this.errors = append(this.errors, err)
-	this.Unlock()
 }
 
 func (this *BaseRequest) Warning(wrn errors.Error) {
@@ -922,12 +936,36 @@ func (this *BaseRequest) DurabilityTimeout() time.Duration {
 	return this.durabilityTimeout
 }
 
-func (this *BaseRequest) ExecutionContext() *execution.Context {
-	return this.executionContext
+func (this *BaseRequest) SetKvTimeout(d time.Duration) {
+	this.kvTimeout = d
+}
+
+func (this *BaseRequest) KvTimeout() time.Duration {
+	return this.kvTimeout
+}
+
+func (this *BaseRequest) SetAtrCollection(s string) {
+	this.atrCollection = s
+}
+
+func (this *BaseRequest) AtrCollection() string {
+	return this.atrCollection
+}
+
+func (this *BaseRequest) SetNumAtrs(n int) {
+	this.numAtrs = n
+}
+
+func (this *BaseRequest) NumAtrs() int {
+	return this.numAtrs
 }
 
 func (this *BaseRequest) SetExecutionContext(ctx *execution.Context) {
 	this.executionContext = ctx
+}
+
+func (this *BaseRequest) ExecutionContext() *execution.Context {
+	return this.executionContext
 }
 
 func (this *BaseRequest) Results() chan bool {
@@ -965,17 +1003,21 @@ func (this *BaseRequest) StopExecute() chan bool {
 func (this *BaseRequest) Stop(state State) {
 	this.SetState(state)
 
-	// just in case we are being stopped before the root operator is set
-	// (like a syntax error in filestore or multistore)
+	// guard against the root operator not being set (eg fatal error)
 	if this.stopOperator != nil {
-		execution.OpStop(this.stopOperator)
+
+		// only one in between Stop() and Done() can happen at any one time
+		this.stopGate.Wait()
+		this.stopGate.Add(1)
+
+		// make sure that a stop can only be sent once (eg close OR timeout)
+		if this.stopOperator != nil {
+			execution.OpStop(this.stopOperator)
+		}
+		this.stopGate.Done()
+		this.stopOperator = nil
 	}
 	sendStop(this.stopExecute)
-}
-
-// alert requestor that the request has completed
-func (this *BaseRequest) Alert() {
-	this.results.Done()
 }
 
 // load control gate
@@ -1005,7 +1047,12 @@ func (this *BaseRequest) CompleteRequest(requestTime time.Duration, serviceTime 
 	// Request Profiling - signal that request has completed and
 	// resources can be pooled / released as necessary
 	if this.timings != nil {
+
+		// only one in between Stop() and Done() can happen at any one time
+		this.stopGate.Wait()
+		this.stopGate.Add(1)
 		this.timings.Done()
+		this.stopGate.Done()
 		this.timings = nil
 	}
 }

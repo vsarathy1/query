@@ -12,10 +12,15 @@
 package couchbase
 
 import (
+	"encoding/json"
+	gerrors "errors"
 	"fmt"
+	"strconv"
 	"sync"
 	"time"
 
+	"github.com/couchbase/gocbcore/v9"
+	"github.com/couchbase/query/algebra"
 	"github.com/couchbase/query/datastore"
 	"github.com/couchbase/query/datastore/couchbase/gcagent"
 	"github.com/couchbase/query/errors"
@@ -65,27 +70,37 @@ func (s *store) StartTransaction(stmtAtomicity bool, context datastore.QueryCont
 		defer func() {
 			// protect from the panics
 			if r := recover(); r != nil {
-				err = errors.NewStartTransactionError(fmt.Errorf("Panic: %v", r))
+				err = errors.NewStartTransactionError(fmt.Errorf("Panic: %v", r), nil)
 			}
 		}()
 
 		gcAgentTxs := s.gcClient.Transactions()
 		if gcAgentTxs == nil {
-			return nil, errors.NewStartTransactionError(gcagent.ErrNoInitTransactions)
+			return nil, errors.NewStartTransactionError(gcagent.ErrNoInitTransactions, nil)
 		}
 
 		txnData := txContext.TxData()
 		var transaction *gctx.Transaction
-		var terr error
 		var expiryTime time.Time
 
-		if len(txnData) > 0 {
+		resume, terr := isResumeTransaction(txnData)
+		if terr != nil {
+			return nil, errors.NewStartTransactionError(terr, nil)
+		}
+
+		if resume {
 			transaction, terr = gcAgentTxs.ResumeTransactionAttempt(txnData)
 			expiryTime = time.Now().Add(txContext.TxTimeout())
 		} else {
 			txConfig := &gctx.PerTransactionConfig{ExpirationTime: txContext.TxTimeout(),
-				DurabilityLevel:  gctx.DurabilityLevel(txContext.TxDurabilityLevel()),
-				KvDurableTimeout: txContext.TxDurabilityTimeout()}
+				DurabilityLevel: gctx.DurabilityLevel(txContext.TxDurabilityLevel()),
+			}
+
+			txConfig.CustomATRLocation.ScopeName, txConfig.CustomATRLocation.CollectionName,
+				txConfig.CustomATRLocation.Agent, terr = AtrCollectionAgentPovider(txContext.AtrCollection())
+			if terr != nil {
+				return nil, errors.NewStartTransactionError(terr, nil)
+			}
 
 			transaction, terr = gcAgentTxs.BeginTransaction(txConfig)
 			if terr == nil {
@@ -93,14 +108,14 @@ func (s *store) StartTransaction(stmtAtomicity bool, context datastore.QueryCont
 				expiryTime = time.Now().Add(txContext.TxTimeout())
 			}
 		}
+
+		// no detach for resume
 		if terr != nil {
-			return nil, errors.NewStartTransactionError(terr)
+			e, c := errorType(terr)
+			return nil, errors.NewStartTransactionError(e, c)
 		}
 
-		txMutations.SetTransaction(transaction, gcAgentTxs.Internal())
-		txContext.SetTxMutations(txMutations)
-		txContext.SetTxId(transaction.Attempt().ID, expiryTime)
-		if len(txnData) > 0 {
+		if resume {
 			for _, mutation := range transaction.GetMutations() {
 				var op MutateOp
 				switch mutation.OpType {
@@ -125,6 +140,9 @@ func (s *store) StartTransaction(stmtAtomicity bool, context datastore.QueryCont
 				}
 			}
 		}
+		txMutations.SetTransaction(transaction, gcAgentTxs.Internal())
+		txContext.SetTxMutations(txMutations)
+		txContext.SetTxId(transaction.Attempt().ID, expiryTime)
 	}
 
 	return
@@ -151,14 +169,14 @@ func (s *store) CommitTransaction(stmtAtomicity bool, context datastore.QueryCon
 	}
 
 	var err, cerr error
-	var diag interface{}
 
 	transaction := txMutations.Transaction()
 	txId := transaction.Attempt().ID
 	logging.Tracef("=====%v=====Commit begin write========", txId)
 	// write all mutations to KV
 	if err = txMutations.Write(context.GetReqDeadline()); err != nil {
-		return errors.NewCommitTransactionError(err, diag)
+		e, c := errorType(err)
+		return errors.NewCommitTransactionError(e, c)
 	}
 	logging.Tracef("=====%v=====Commit end   write========", txId)
 
@@ -168,7 +186,7 @@ func (s *store) CommitTransaction(stmtAtomicity bool, context datastore.QueryCon
 		defer func() {
 			// protect from the panics
 			if r := recover(); r != nil {
-				errOut = errors.NewCommitTransactionError(fmt.Errorf("Panic: %v", r), diag)
+				errOut = errors.NewCommitTransactionError(fmt.Errorf("Panic: %v", r), nil)
 			}
 		}()
 
@@ -195,9 +213,11 @@ func (s *store) CommitTransaction(stmtAtomicity bool, context datastore.QueryCon
 
 	// Release transaction mutations
 	txMutations.DeleteAll(true)
+	txContext.SetTxMutations(nil)
 
 	if err != nil {
-		return errors.NewCommitTransactionError(err, diag)
+		e, c := errorType(err)
+		return errors.NewCommitTransactionError(e, c)
 	}
 
 	return nil
@@ -228,7 +248,6 @@ func (s *store) RollbackTransaction(stmtAtomicity bool, context datastore.QueryC
 	}
 
 	var err, cerr error
-	var diag interface{}
 
 	transaction := txMutations.Transaction()
 	if transaction != nil {
@@ -237,7 +256,7 @@ func (s *store) RollbackTransaction(stmtAtomicity bool, context datastore.QueryC
 		defer func() {
 			// protect from the panics
 			if r := recover(); r != nil {
-				errOut = errors.NewRollbackTransactionError(fmt.Errorf("Panic: %v", r), diag)
+				errOut = errors.NewRollbackTransactionError(fmt.Errorf("Panic: %v", r), nil)
 			}
 		}()
 
@@ -263,7 +282,8 @@ func (s *store) RollbackTransaction(stmtAtomicity bool, context datastore.QueryC
 	txContext.SetTxMutations(nil)
 
 	if err != nil {
-		return errors.NewRollbackTransactionError(err, diag)
+		e, c := errorType(err)
+		return errors.NewRollbackTransactionError(e, c)
 	}
 
 	return nil
@@ -321,7 +341,7 @@ func (s *store) SetSavepoint(stmtAtomicity bool, context datastore.QueryContext,
 }
 
 func (ks *keyspace) txReady(txContext *transactions.TranContext) errors.Error {
-	if txContext.TxExpired() {
+	if txContext != nil && txContext.TxExpired() {
 		return errors.NewTransactionExpired()
 	}
 
@@ -357,6 +377,7 @@ func (ks *keyspace) txFetch(fullName, qualifiedName, scopeName, collectionName s
 
 	var transaction *gctx.Transaction
 	fkeys := keys
+	sdkKv, sdkCas, sdkTxnMeta := GetTxDataValues(context.TxDataVal())
 	if txMutations, _ := txContext.TxMutations().(*TransactionMutations); txMutations != nil {
 		var err errors.Error
 		mvs := make(map[string]*MutationValue, len(keys))
@@ -368,6 +389,17 @@ func (ks *keyspace) txFetch(fullName, qualifiedName, scopeName, collectionName s
 			return errors.Errors{err}
 		}
 
+		if sdkKv && sdkCas != 0 && len(keys) == 1 {
+			// Transformed SDK REPLACE, DELETE with CAS don't read the document
+			k := keys[0]
+			if len(fkeys) == 0 && txMutations.IsDeletedMutation(qualifiedName, k) {
+				return errors.Errors{errors.NewKeyNotFoundError(k, nil)}
+			} else if len(fkeys) == 1 {
+				mvs[k] = &MutationValue{Val: value.NewValue(nil), Cas: sdkCas, TxnMeta: sdkTxnMeta}
+				fkeys = fkeys[0:0]
+			}
+		}
+
 		for k, mv := range mvs {
 			av := value.NewAnnotatedValue(mv.Val)
 			meta := av.NewMeta()
@@ -376,36 +408,36 @@ func (ks *keyspace) txFetch(fullName, qualifiedName, scopeName, collectionName s
 			meta["type"] = "json"
 			meta["flags"] = uint32(0)
 			meta["expiration"] = mv.Expiration
-			meta["txnMeta"] = mv.TxnMeta
+			if mv.TxnMeta != nil {
+				meta["txnMeta"] = mv.TxnMeta
+			}
 			av.SetId(k)
 			fetchMap[k] = av
 		}
 	}
 
 	if len(fkeys) > 0 {
-		sdkKv, sdkCas, sdkTxnMeta := GetTxDataValues(context.TxDataVal())
-		if sdkKv && sdkCas != 0 && len(fkeys) == 1 && sdkTxnMeta != nil {
-			// Transformed SDK REPLACE, DELETE with CAS don't read the document
-			k := fkeys[0]
-			av := value.NewAnnotatedValue(value.NewValue(nil))
-			meta := av.NewMeta()
-			meta["keyspace"] = fullName
-			meta["cas"] = sdkCas
-			meta["type"] = "json"
-			meta["flags"] = uint32(0)
-			meta["expiration"] = uint32(0)
-			meta["txnMeta"] = sdkTxnMeta
-			av.SetId(k)
-			fetchMap[k] = av
-		} else {
-			// Transformed SDK operation, don't ignore key not found error (except insert check)
-			notFoundErr := sdkKv && !sdkKvInsert
-			// fetch the keys that are not present in delta keyspace
-			errs := ks.agentProvider.TxGet(transaction, fullName, ks.name, scopeName, collectionName,
-				collId, fkeys, subPaths, context.GetReqDeadline(), false, notFoundErr, fetchMap)
-			if len(errs) > 0 {
-				return errors.NewErrors(errs, "txFetch")
+		// Transformed SDK operation, don't ignore key not found error (except insert check)
+		notFoundErr := sdkKv && !sdkKvInsert
+		// fetch the keys that are not present in delta keyspace
+		errs := ks.agentProvider.TxGet(transaction, fullName, ks.name, scopeName, collectionName,
+			collId, fkeys, subPaths, context.GetReqDeadline(), false, notFoundErr, fetchMap)
+		if len(errs) > 0 {
+			if notFoundErr && gerrors.Is(errs[0], gocbcore.ErrDocumentNotFound) {
+				_, c := errorType(errs[0])
+				return errors.Errors{errors.NewKeyNotFoundError(fkeys[0], c)}
 			}
+
+			var rerrs errors.Errors
+			for _, e := range errs {
+				e1, c := errorType(e)
+				rerr := errors.NewError(e1, "txFetch")
+				if c != nil {
+					rerr.SetCause(c)
+				}
+				rerrs = append(rerrs, rerr)
+			}
+			return rerrs
 		}
 	}
 
@@ -423,7 +455,7 @@ func (ks *keyspace) txPerformOp(op MutateOp, qualifiedName, scopeName, collectio
 
 	txMutations := txContext.TxMutations().(*TransactionMutations)
 	var fetchMap map[string]value.AnnotatedValue
-	sdkKv, sdkCas, sdkTxnMeta := GetTxDataValues(context.TxDataVal())
+	sdkKv, sdkCas, _ := GetTxDataValues(context.TxDataVal())
 	sdkKvInsert := sdkKv && op == MOP_INSERT
 
 	if op == MOP_UPSERT || sdkKvInsert {
@@ -452,6 +484,10 @@ func (ks *keyspace) txPerformOp(op MutateOp, qualifiedName, scopeName, collectio
 		val := kv.Value
 		nop := op
 
+		if val != nil && val.Type() == value.BINARY {
+			return nil, errors.NewBinaryDocumentMutationError(_MutateOpNames[op], key)
+		}
+
 		if op != MOP_DELETE {
 			data = val.ActualForIndex()
 			exptime = getExpiration(kv.Options)
@@ -466,6 +502,7 @@ func (ks *keyspace) txPerformOp(op MutateOp, qualifiedName, scopeName, collectio
 					return nil, errors.NewDuplicateKeyError(key)
 				}
 				val = av
+				kv.Value = val
 			} else {
 				nop = MOP_INSERT
 			}
@@ -474,10 +511,8 @@ func (ks *keyspace) txPerformOp(op MutateOp, qualifiedName, scopeName, collectio
 		must := (nop == MOP_UPDATE || nop == MOP_DELETE)
 		cas, _, txnMeta, err1 := getMeta(kv.Name, val, must)
 		if err1 == nil && must {
-			if txnMeta == nil || (sdkKv && sdkTxnMeta == nil) {
-				err1 = fmt.Errorf("Not valid txnMeta value for key %v", kv.Name)
-			} else if sdkKv && sdkCas != cas {
-				err1 = fmt.Errorf("Missmatch cas values(%v,%v) for key %v", sdkCas, cas, kv.Name)
+			if sdkKv && sdkCas != cas {
+				return nil, errors.NewCasMissmatch(_MutateOpNames[op], kv.Name, sdkCas, cas)
 			}
 		}
 
@@ -486,7 +521,7 @@ func (ks *keyspace) txPerformOp(op MutateOp, qualifiedName, scopeName, collectio
 		}
 
 		if nop == MOP_INSERT {
-			txnMeta = []byte("{}")
+			txnMeta = nil
 		}
 
 		// Add to mutations
@@ -499,6 +534,13 @@ func (ks *keyspace) txPerformOp(op MutateOp, qualifiedName, scopeName, collectio
 
 		if retCas > 0 && !SetMetaCas(val, retCas) {
 			return nil, errors.NewTransactionError(fmt.Errorf("Setting return cas error"), _MutateOpNames[op])
+		}
+
+		// upsert and not already in the fetchMap then add so that same upsert key will make it update in same statement
+		if op == MOP_UPSERT {
+			if _, ok := fetchMap[key]; !ok {
+				fetchMap[key] = val.(value.AnnotatedValue)
+			}
 		}
 
 		mPairs = append(mPairs, kv)
@@ -524,11 +566,94 @@ func GetTxDataValues(txDataVal value.Value) (kv bool, cas uint64, txnMeta interf
 			cas = uint64(value.AsNumberValue(v).Int64())
 		}
 
-		if v, ok := txDataVal.Field("txnMeta"); ok && v.Type() == value.OBJECT {
+		if v, ok := txDataVal.Field("scas"); ok && v.Type() == value.STRING {
+			s, _ := v.Actual().(string)
+			if u64, err := strconv.ParseUint(s, 10, 64); err == nil {
+				cas = u64
+			}
+		}
+
+		if v, ok := txDataVal.Field("txnMeta"); ok && v.Type() != value.MISSING {
 			txnMeta, _ = v.MarshalJSON()
 		}
 	}
 	return
+}
+
+func isResumeTransaction(b []byte) (bool, error) {
+	if len(b) == 0 {
+		return false, nil
+	}
+
+	type jsonSerializedAttempt struct {
+		ID struct {
+			Transaction string `json:"txn"`
+			Attempt     string `json:"atmpt"`
+		} `json:"id"`
+	}
+
+	var txData jsonSerializedAttempt
+
+	if err := json.Unmarshal(b, &txData); err != nil {
+		return false, err
+	}
+
+	return txData.ID.Transaction != "", nil
+}
+
+func AtrCollectionAgentPovider(atrCollection string) (string, string, *gocbcore.Agent, error) {
+	if atrCollection == "" {
+		return "", "", nil, nil
+	}
+	path, err := algebra.NewVariablePathWithContext(atrCollection, "default", "")
+	if err != nil {
+		return "", "", nil, err
+	}
+
+	agent, cerr := CollectionAgentProvider(path.Bucket(), path.Scope(), path.Keyspace())
+	return path.Scope(), path.Keyspace(), agent, cerr
+}
+
+func CollectionAgentProvider(bucketName, scpName, collName string) (agent *gocbcore.Agent, rerr error) {
+	if bucketName == "" || scpName == "" || collName == "" {
+		return nil, fmt.Errorf("Not valid collection : `%v`.`%v`.`%v`", bucketName, scpName, collName)
+	}
+
+	ks, cerr := datastore.GetKeyspace("default", bucketName, scpName, collName)
+	if cerr != nil {
+		return nil, cerr
+	}
+
+	coll, ok := ks.(*collection)
+	if !ok {
+		return nil, fmt.Errorf("%v is not a collection", ks.QualifiedName())
+	}
+
+	if cerr = coll.bucket.txReady(nil); cerr != nil {
+		return nil, cerr.GetICause()
+	}
+	return coll.bucket.agentProvider.Agent(), nil
+}
+
+func errorType(err error) (error, interface{}) {
+	if terr, ok := err.(*gctx.TransactionOperationFailedError); ok {
+		// TODO:: Until gocbcore-transactions provides API populate the info.
+		c := make(map[string]interface{}, 5)
+		if terr.Retry() {
+			c["retry"] = terr.Retry()
+		}
+
+		if terr.Rollback() {
+			c["rollback"] = terr.Rollback()
+		}
+
+		c["raise"] = terr.ToRaise()
+		c["class"] = terr.ErrorClass()
+		c["msg"] = terr.Unwrap().Error()
+
+		return nil, c
+	}
+	return err, nil
 }
 
 func initGocb(s *store) (err errors.Error) {
@@ -537,8 +662,18 @@ func initGocb(s *store) (err errors.Error) {
 		certFile = s.connSecConfig.CertFile
 	}
 
-	client, cerr := gcagent.NewClient(s.URL(), certFile, datastore.DEF_TXTIMEOUT)
+	tranSettings := datastore.GetTransactionSettings()
+	txConfig := &gctx.Config{
+		ExpirationTime:        tranSettings.TxTimeout(),
+		CleanupWindow:         tranSettings.CleanupWindow(),
+		CleanupClientAttempts: tranSettings.CleanupClientAttempts(),
+		CleanupLostAttempts:   tranSettings.CleanupLostAttempts(),
+		BucketAgentProvider: func(bucketName string) (agent *gocbcore.Agent, rerr error) {
+			return CollectionAgentProvider(bucketName, "_default", "_default")
+		},
+	}
 
+	client, cerr := gcagent.NewClient(s.URL(), certFile)
 	s.nslock.Lock()
 	defer s.nslock.Unlock()
 
@@ -554,6 +689,23 @@ func initGocb(s *store) (err errors.Error) {
 		logging.Errorf(err.Error())
 		return err
 	}
+
 	s.gcClient = client
+
+	// don't raise error not able to setup ATR Collection. Disable time being
+
+	//	txConfig.CustomATRLocation.ScopeName, txConfig.CustomATRLocation.CollectionName,
+	//		txConfig.CustomATRLocation.Agent, _ = AtrCollectionAgentPovider(tranSettings.AtrCollection())
+
+	logging.Infof("Transaction Initalization: ExpirationTime: %v, CleanupWindow: %v, CleanupClientAttempts: %v, CleanupLostAttempts: %v",
+		txConfig.ExpirationTime, txConfig.CleanupWindow, txConfig.CleanupClientAttempts, txConfig.CleanupLostAttempts)
+
+	cerr = client.InitTransactions(txConfig)
+	if cerr != nil {
+		client.Close()
+		s.gcClient = nil
+		return errors.NewError(cerr, "Transaction initalization failed")
+	}
+
 	return nil
 }

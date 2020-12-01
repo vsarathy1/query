@@ -272,7 +272,8 @@ func (this *TransactionMutations) Fetch(keyspace string, keys []string, mvs map[
 
 	rkeys = make([]string, 0, len(keys))
 	for _, k := range keys {
-		if mv, ok := dk.values[k]; ok {
+		if mv, ok := dk.values[k]; ok && (mv.Flags&MV_FLAGS_WRITE) != 0 {
+			// consider only n1ql mutated  keys
 			// delta keyspace has entry. ignore deleted key
 			if mv.Op != MOP_DELETE && mv.Op != MOP_NONE {
 				mvs[k] = mv
@@ -286,6 +287,27 @@ func (this *TransactionMutations) Fetch(keyspace string, keys []string, mvs map[
 	return rkeys, nil
 }
 
+// Document Deleted returns true
+
+func (this *TransactionMutations) IsDeletedMutation(keyspace string, key string) bool {
+
+	// lock is not required. Only set at start. can't read local mutations for implicit transaction.
+	if this.tranImplicit {
+		return false
+	}
+
+	this.mutex.RLock()
+	defer this.mutex.RUnlock()
+
+	if dk, _ := this.keyspaces[keyspace]; dk != nil {
+		if mv, ok := dk.values[key]; ok && mv.Op == MOP_DELETE {
+			return true
+		}
+	}
+
+	return false
+}
+
 /*
  Add the entries to transaction mutations.
      current Delta keysapce
@@ -293,24 +315,24 @@ func (this *TransactionMutations) Fetch(keyspace string, keys []string, mvs map[
      KV has INSERT, UPDATE, DELETE ops separate and we are staging localy we must go through transformation
      and protect original operation. ALso need to preserve orginal CAS.
 
-prev  +  cur     --->  future
----------------------------
-INSERT   INSERT   ---  error
-         UPSERT   ---  INSERT
-         UPDATE   ---  INSERT
-         DELETE   ---  Remove with 0 cas
-UPSERT   INSERT   ---  error
-         UPSERT   ---- UPSERT
-         UPDATE   ---- UPSERT
-         DELETE   ---- DELETE
-UPDATE   INSERT   ---  error
-         UPSERT   ---- UPDATE
-         UPDATE   ---- UPDATE
-         DELETE   ---- DELETE
-DELETE   INSERT   ---  UPDATE with cas  *
-         UPSERT   ---- UPDATE with cas  *
-         UPDATE   ---- N/A
-         DELETE   ---- N/A
+prev  +  cur     --->  future                  SDK-Mutations
+------------------------------------------------------------
+INSERT   INSERT   ---  error                   error
+         UPSERT   ---  INSERT                  UPDATE
+         UPDATE   ---  INSERT                  UPDATE
+         DELETE   ---  Remove with 0 cas       DELETE
+UPSERT   INSERT   ---  error                   error
+         UPSERT   ---- UPSERT                  UPDATE
+         UPDATE   ---- UPSERT                  UPDATE
+         DELETE   ---- DELETE                  DELETE
+UPDATE   INSERT   ---  error                   error
+         UPSERT   ---- UPDATE                  UPDATE
+         UPDATE   ---- UPDATE                  UPDATE
+         DELETE   ---- DELETE                  DELETE
+DELETE   INSERT   ---  UPDATE with cas  *      INSERT
+         UPSERT   ---- UPDATE with cas  *      INSERT
+         UPDATE   ---- N/A                     N/A
+         DELETE   ---- N/A                     N/A
 */
 
 func (this *TransactionMutations) Add(op MutateOp, keyspace, bucketName, scopeName, collectionName string,
@@ -368,26 +390,33 @@ func (this *TransactionMutations) Add(op MutateOp, keyspace, bucketName, scopeNa
 		}
 
 		// Previous statement has MOP_DELETE and non zero CAS transform to MOP_UPDATE
-		if mmv != nil && mmv.Op == MOP_DELETE && cas != 0 {
+		if mmv != nil && mmv.Op == MOP_DELETE && cas != 0 && (mmv.Flags&MV_FLAGS_WRITE) != 0 {
 			op = MOP_UPDATE
 		}
 
 	case MOP_UPSERT:
 		if mmv != nil {
-			if mmv.Op == MOP_INSERT || mmv.Op == MOP_UPDATE {
-				// Previous statement has MOP_INSERT, MOP_UPDATE retain previous Operation
-				op = mmv.Op
-			} else if mmv.Op == MOP_DELETE && cas != 0 {
-				// Previous statement has MOP_DELETE and non zero CAS transform to MOP_UPDATE
+			if (mmv.Flags & MV_FLAGS_WRITE) != 0 {
+				if mmv.Op == MOP_INSERT || mmv.Op == MOP_UPDATE {
+					// Previous statement has MOP_INSERT, MOP_UPDATE retain previous Operation
+					op = mmv.Op
+				} else if mmv.Op == MOP_DELETE && cas != 0 {
+					// Previous statement has MOP_DELETE and non zero CAS transform to MOP_UPDATE
+					op = MOP_UPDATE
+				}
+			} else if mmv.Op == MOP_DELETE {
+				op = MOP_INSERT
+			} else {
 				op = MOP_UPDATE
 			}
 		}
 	case MOP_UPDATE:
-		if mmv != nil && (mmv.Op == MOP_INSERT || mmv.Op == MOP_UPSERT) {
+		if mmv != nil && (mmv.Op == MOP_INSERT || mmv.Op == MOP_UPSERT) && (mmv.Flags&MV_FLAGS_WRITE) != 0 {
 			// Previous statement has MOP_INSERT, MOP_UPSERT retain previous Operation
 			op = mmv.Op
 		}
 	case MOP_DELETE:
+
 	default:
 		return retCas, nil
 	}
@@ -547,17 +576,25 @@ func (this *TransactionMutations) UndoLog(sLog, sLogValIndex uint64) (err errors
 		var tlv *TransactionLogValue
 		var tl *TransactionLog
 		var dk *DeltaKeyspace
+		var cl, ci int
 
 		// current keyspace logs can be truncated and no replay required. (Those are only in current delata keyspace)
 		startLog := int(sLog)
 		startLogValIndex := int(sLogValIndex)
 		cKeyspace := this.curKeyspace
-		cl := int(this.curStartLogIndex / uint64(this.logSize))
-		ci := int(this.curStartLogIndex % uint64(this.logSize))
+		if cKeyspace == "" {
+			cl = len(this.logs) - 1
+			if tl = this.logs[cl]; tl != nil {
+				ci = len(tl.logValues) - 1
+			}
+		} else {
+			cl = int(this.curStartLogIndex / uint64(this.logSize))
+			ci = int(this.curStartLogIndex % uint64(this.logSize))
 
-		this.logs = this.logs[:cl+1]
-		if tl = this.logs[cl]; tl != nil {
-			tl.logValues = tl.logValues[:ci]
+			this.logs = this.logs[:cl+1]
+			if tl = this.logs[cl]; tl != nil {
+				tl.logValues = tl.logValues[:ci]
+			}
 		}
 
 		// replay previous statement logs
@@ -635,7 +672,7 @@ func (this *TransactionMutations) MergeDeltaKeyspace() (err errors.Error) {
 	for key, mv := range dk.GetAll() {
 		if mv.Op == MOP_DELETE {
 			// current is DELETE and original one is INSERT remove from delta keyspace
-			if mmv, ok := mdk.values[key]; ok && mmv.Op == MOP_INSERT {
+			if mmv, ok := mdk.values[key]; ok && mmv.Op == MOP_INSERT && (mmv.Flags&MV_FLAGS_WRITE) != 0 {
 				mdk.values[key] = nil
 				delete(mdk.values, key)
 				continue
@@ -704,7 +741,10 @@ func (this *DeltaKeyspace) Write(transaction *gctx.Transaction, txnInternal *gct
 				}
 			}
 
-			txnMeta, _ := mv.TxnMeta.([]byte)
+			var txnMeta []byte
+			if mv.TxnMeta != nil {
+				txnMeta, _ = mv.TxnMeta.([]byte)
+			}
 
 			// batch of write ops
 			wops = append(wops, &gcagent.WriteOp{Op: int(mv.Op),

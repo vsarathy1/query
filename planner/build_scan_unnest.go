@@ -102,7 +102,7 @@ func (this *builder) buildUnnestScan(node *algebra.KeyspaceTerm, from algebra.Fr
 	for _, unnest := range primaryUnnests {
 		for _, index := range unnestIndexes {
 			arrayKey := arrayKeys[index]
-			op, _, _, n, err = this.matchUnnest(node, pred, unnest, index, indexes[index],
+			op, _, _, n, err = this.matchUnnest(node, pred, unnest, indexes[index],
 				arrayKey, unnests, hasDeltaKeyspace)
 			if err != nil {
 				return nil, 0, err
@@ -274,7 +274,7 @@ func collectUnnestIndexes(pred expression.Expression, indexes map[datastore.Inde
 }
 
 func (this *builder) matchUnnest(node *algebra.KeyspaceTerm, pred expression.Expression, unnest *algebra.Unnest,
-	index datastore.Index, entry *indexEntry, arrayKey *expression.All, unnests []*algebra.Unnest, hasDeltaKeyspace bool) (
+	entry *indexEntry, arrayKey *expression.All, unnests []*algebra.Unnest, hasDeltaKeyspace bool) (
 	plan.SecondaryScan, *algebra.Unnest, *expression.All, int, error) {
 
 	var sargKey expression.Expression
@@ -334,7 +334,7 @@ func (this *builder) matchUnnest(node *algebra.KeyspaceTerm, pred expression.Exp
 					continue
 				}
 
-				op, un, nArrayKey, n, err := this.matchUnnest(node, pred, u, index, entry,
+				op, un, nArrayKey, n, err := this.matchUnnest(node, pred, u, entry,
 					nestedArrayKey, unnests, hasDeltaKeyspace)
 				if err != nil {
 					return nil, nil, nil, 0, err
@@ -368,12 +368,14 @@ func (this *builder) matchUnnest(node *algebra.KeyspaceTerm, pred expression.Exp
 		keyspaces[node.Alias()] = node.Keyspace()
 		for _, fl := range baseKeyspace.Filters() {
 			if fl.IsUnnest() {
-				sel := getUnnestPredSelec(fl.FltrExpr(), unnest.As(), unnest.Expression(), keyspaces, advisorValidate)
+				sel := getUnnestPredSelec(fl.FltrExpr(), unnest.As(),
+					unnest.Expression(), keyspaces, advisorValidate, this.context)
 				fl.SetSelec(sel)
 			}
 		}
 	}
 
+	index := entry.index
 	formalizer := expression.NewSelfFormalizer(node.Alias(), nil)
 	sargKeys := make(expression.Expressions, 0, len(index.RangeKey()))
 	for i, key := range index.RangeKey() {
@@ -400,7 +402,8 @@ func (this *builder) matchUnnest(node *algebra.KeyspaceTerm, pred expression.Exp
 		n = max
 	}
 
-	spans, exactSpans, err := SargFor(pred, sargKeys, n, false, this.useCBO, baseKeyspace, this.keyspaceNames, advisorValidate)
+	spans, exactSpans, err := SargFor(pred, entry, sargKeys, n, false, this.useCBO,
+		baseKeyspace, this.keyspaceNames, advisorValidate, this.context)
 	if err != nil {
 		return nil, nil, nil, 0, err
 	}
@@ -410,7 +413,7 @@ func (this *builder) matchUnnest(node *algebra.KeyspaceTerm, pred expression.Exp
 	selectivity := OPT_SELEC_NOT_AVAIL
 	if this.useCBO {
 		cost, selectivity, cardinality, err = indexScanCost(entry.index, sargKeys, this.context.RequestId(),
-			spans, node.Alias(), this.advisorValidate())
+			spans, node.Alias(), this.advisorValidate(), this.context)
 		if err != nil {
 			cost = OPT_COST_NOT_AVAIL
 			cardinality = OPT_CARD_NOT_AVAIL

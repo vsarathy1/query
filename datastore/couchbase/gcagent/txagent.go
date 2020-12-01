@@ -12,6 +12,7 @@
 package gcagent
 
 import (
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -32,6 +33,8 @@ const (
 	MOP_DELETE
 )
 
+var _MutateOpNames = [...]string{"UNKNOWN", "INSERT", "UPSERT", "UPDATE", "DELETE"}
+
 type GetOp struct {
 	Key    string
 	Val    value.AnnotatedValue
@@ -40,11 +43,85 @@ type GetOp struct {
 }
 
 type AgentProvider struct {
-	provider *gocbcore.Agent
+	mutex      sync.RWMutex
+	client     *Client
+	bucketName string
+	provider   *gocbcore.Agent
+}
+
+/* gocbcore will not allow Refresh the SSL certificates.
+ * We must close old agent and create new one each time cerificate change.
+ * Close old agent after 2 minutes so that any transient connections will be serviced.
+ * If still not finished we will return error
+ */
+func (ap *AgentProvider) CreateOrRefreshAgent() error {
+	var config gocbcore.AgentConfig
+
+	rootCAs := ap.client.TLSRootCAs()
+	if rootCAs != nil {
+		// Use SSL config
+		config = *ap.client.sslConfig
+		config.UseTLS = true
+		config.TLSRootCAProvider = func() *x509.CertPool {
+			return rootCAs
+		}
+	} else {
+		// use non-SSL config
+		config = *ap.client.config
+	}
+
+	config.UserAgent = ap.bucketName
+	config.BucketName = ap.bucketName
+
+	agent, err := gocbcore.CreateAgent(&config)
+	if err != nil {
+		return err
+	}
+
+	if _WARMUP && config.BucketName != "" {
+		// Warm up by calling wait until ready
+		warmWaitCh := make(chan struct{}, 1)
+		if _, werr := agent.WaitUntilReady(
+			time.Now().Add(_WARMUPTIMEOUT),
+			gocbcore.WaitUntilReadyOptions{},
+			func(result *gocbcore.WaitUntilReadyResult, cerr error) {
+				if cerr != nil {
+					err = cerr
+				}
+				warmWaitCh <- struct{}{}
+			}); werr != nil && err == nil {
+			err = werr
+		}
+		<-warmWaitCh
+	}
+
+	ap.mutex.Lock()
+	oldAgent := ap.provider
+	ap.provider = agent
+	ap.mutex.Unlock()
+	if oldAgent != nil {
+		// close old agent after 2 minutes
+		go func() {
+			time.Sleep(_CLOSEWAIT)
+			oldAgent.Close()
+		}()
+	}
+
+	return nil
+}
+
+func (ap *AgentProvider) Refresh() error {
+	return ap.CreateOrRefreshAgent()
+}
+
+func (ap *AgentProvider) Agent() *gocbcore.Agent {
+	ap.mutex.RLock()
+	defer ap.mutex.RUnlock()
+	return ap.provider
 }
 
 func (ap *AgentProvider) Close() error {
-	return ap.provider.Close()
+	return ap.Agent().Close()
 }
 
 func (ap *AgentProvider) Deadline(d time.Time, n int) time.Time {
@@ -56,13 +133,8 @@ func (ap *AgentProvider) Deadline(d time.Time, n int) time.Time {
 
 // Create annotated value
 
-func (ap *AgentProvider) getTxAnnotatedValue(res *gctx.GetResult, key, fullName string) (value.AnnotatedValue, error) {
-	txnMetaBytes, err := json.Marshal(res.Meta)
-	if err != nil {
-		return nil, err
-	}
-
-	av := value.NewAnnotatedValue(value.NewParsedValue(res.Value, false))
+func (ap *AgentProvider) getTxAnnotatedValue(res *gctx.GetResult, key, fullName string) (av value.AnnotatedValue, err error) {
+	av = value.NewAnnotatedValue(value.NewParsedValue(res.Value, false))
 	meta_type := "json"
 	if av.Type() == value.BINARY {
 		meta_type = "base64"
@@ -74,9 +146,13 @@ func (ap *AgentProvider) getTxAnnotatedValue(res *gctx.GetResult, key, fullName 
 	meta["type"] = meta_type
 	meta["flags"] = uint32(0)
 	meta["expiration"] = uint32(0)
-	meta["txnMeta"] = txnMetaBytes
+	if res.Meta != nil {
+		meta["txnMeta"], err = json.Marshal(*res.Meta)
+		if err != nil {
+			return nil, err
+		}
+	}
 	av.SetId(key)
-
 	return av, nil
 }
 
@@ -102,7 +178,7 @@ func (ap *AgentProvider) TxGet(transaction *gctx.Transaction, fullName, bucketNa
 	sendOneGet := func(item *GetOp) error {
 		wg.Add(1)
 		cerr := transaction.Get(gctx.GetOptions{
-			Agent:          ap.provider,
+			Agent:          ap.Agent(),
 			ScopeName:      scopeName,
 			CollectionName: collectionName,
 			Key:            []byte(item.Key),
@@ -146,7 +222,13 @@ func (ap *AgentProvider) TxGet(transaction *gctx.Transaction, fullName, bucketNa
 			fetchMap[item.Key] = item.Val
 		} else if notFoundErr || !errors.Is(item.Err, gocbcore.ErrDocumentNotFound) {
 			// handle key not found error
-			errs = append(errs, item.Err)
+			// process other errors before processing PreviousOperationFailed
+			if err1, ok1 := item.Err.(*gctx.TransactionOperationFailedError); ok1 &&
+				errors.Is(err1.Unwrap(), gctx.ErrPreviousOperationFailed) {
+				prevErr = item.Err
+			} else {
+				errs = append(errs, item.Err)
+			}
 		}
 	}
 
@@ -192,7 +274,7 @@ func (ap *AgentProvider) TxWrite(transaction *gctx.Transaction, txnInternal *gct
 	sendInsertOne := func(wop *WriteOp) error {
 		wg.Add(1)
 		cerr := transaction.Insert(gctx.InsertOptions{
-			Agent:          ap.provider,
+			Agent:          ap.Agent(),
 			ScopeName:      scopeName,
 			CollectionName: collectionName,
 			Key:            []byte(wop.Key),
@@ -247,11 +329,14 @@ func (ap *AgentProvider) TxWrite(transaction *gctx.Transaction, txnInternal *gct
 		case MOP_INSERT:
 			errOut = sendInsertOne(op)
 		case MOP_UPDATE:
-			var txnMeta gctx.MutableItemMeta
-			errOut = json.Unmarshal(op.TxnMeta, &txnMeta)
+			var txnMeta *gctx.MutableItemMeta
+			if len(op.TxnMeta) > 0 {
+				txnMeta = &gctx.MutableItemMeta{}
+				errOut = json.Unmarshal(op.TxnMeta, &txnMeta)
+			}
 			if errOut == nil {
 				tmpRes := txnInternal.CreateGetResult(gctx.CreateGetResultOptions{
-					Agent:          ap.provider,
+					Agent:          ap.Agent(),
 					ScopeName:      scopeName,
 					CollectionName: collectionName,
 					Key:            []byte(op.Key),
@@ -261,11 +346,14 @@ func (ap *AgentProvider) TxWrite(transaction *gctx.Transaction, txnInternal *gct
 				errOut = sendUpdateOne(op, tmpRes)
 			}
 		case MOP_DELETE:
-			var txnMeta gctx.MutableItemMeta
-			errOut = json.Unmarshal(op.TxnMeta, &txnMeta)
+			var txnMeta *gctx.MutableItemMeta
+			if len(op.TxnMeta) > 0 {
+				txnMeta = &gctx.MutableItemMeta{}
+				errOut = json.Unmarshal(op.TxnMeta, &txnMeta)
+			}
 			if errOut == nil {
 				tmpRes := txnInternal.CreateGetResult(gctx.CreateGetResultOptions{
-					Agent:          ap.provider,
+					Agent:          ap.Agent(),
 					ScopeName:      scopeName,
 					CollectionName: collectionName,
 					Key:            []byte(op.Key),
@@ -293,7 +381,13 @@ func (ap *AgentProvider) TxWrite(transaction *gctx.Transaction, txnInternal *gct
 	wg.Wait()
 	for _, op := range wops {
 		if op.Err != nil {
-			return op.Err
+			// process other errors before processing PreviousOperationFailed
+			if err1, ok1 := op.Err.(*gctx.TransactionOperationFailedError); ok1 &&
+				errors.Is(err1.Unwrap(), gctx.ErrPreviousOperationFailed) {
+				prevErr = op.Err
+			} else {
+				return op.Err
+			}
 		}
 	}
 

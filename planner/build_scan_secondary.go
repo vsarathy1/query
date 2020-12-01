@@ -252,6 +252,20 @@ func (this *builder) sargableIndexes(indexes []datastore.Index, pred, subset exp
 	ubs expression.Bindings, join bool) (
 	sargables, all, arrays, flex map[datastore.Index]*indexEntry, err error) {
 
+	flexPred := pred
+	if len(this.context.NamedArgs()) > 0 || len(this.context.PositionalArgs()) > 0 {
+		namedArgs := this.context.NamedArgs()
+		positionalArgs := this.context.PositionalArgs()
+		subset, err = base.ReplaceParameters(subset, namedArgs, positionalArgs)
+		if err != nil {
+			return
+		}
+		flexPred, err = base.ReplaceParameters(flexPred, namedArgs, positionalArgs)
+		if err != nil {
+			return
+		}
+	}
+
 	sargables = make(map[datastore.Index]*indexEntry, len(indexes))
 	all = make(map[datastore.Index]*indexEntry, len(indexes))
 	arrays = make(map[datastore.Index]*indexEntry, len(indexes))
@@ -266,7 +280,7 @@ func (this *builder) sargableIndexes(indexes []datastore.Index, pred, subset exp
 				// FTS Flex index sargability
 				if flexRequest == nil {
 					flex = make(map[datastore.Index]*indexEntry, len(indexes))
-					flexRequest = this.buildFTSFlexRequest(formalizer.Keyspace(), pred, ubs)
+					flexRequest = this.buildFTSFlexRequest(formalizer.Keyspace(), flexPred, ubs)
 				}
 
 				entry, err = this.sargableFlexSearchIndex(index, flexRequest, join)
@@ -417,22 +431,38 @@ func (this *builder) minimalIndexes(sargables map[datastore.Index]*indexEntry, s
 		predFc = pred.FilterCovers(predFc)
 	}
 
-	advisorValidate := this.advisorValidate()
-	for s, se := range sargables {
-		if this.useCBO && se.cost <= 0.0 {
-			cost, selec, card, e := indexScanCost(se.index, se.sargKeys, this.context.RequestId(), se.spans, alias, advisorValidate)
-			if e != nil || (cost <= 0.0 || card <= 0.0) {
-				useCBO = false
-			} else {
-				se.cost = cost
-				se.cardinality = card
-				se.selectivity = selec
+	if useCBO {
+		advisorValidate := this.advisorValidate()
+		for _, se := range sargables {
+			if se.cost <= 0.0 {
+				cost, selec, card, e := indexScanCost(se.index, se.sargKeys,
+					this.context.RequestId(), se.spans, alias, advisorValidate,
+					this.context)
+				if e != nil || (cost <= 0.0 || card <= 0.0) {
+					useCBO = false
+				} else {
+					se.cost = cost
+					se.cardinality = card
+					se.selectivity = selec
+				}
 			}
 		}
+	}
 
+	for s, se := range sargables {
 		for t, te := range sargables {
-			if t != s && narrowerOrEquivalent(se, te, shortest, predFc) {
-				delete(sargables, t)
+			if t == s {
+				continue
+			}
+
+			if useCBO && shortest {
+				if matchedLeadingKeys(se, te, predFc) && se.cost < te.cost {
+					delete(sargables, t)
+				}
+			} else {
+				if narrowerOrEquivalent(se, te, shortest, predFc) {
+					delete(sargables, t)
+				}
 			}
 		}
 	}
@@ -451,6 +481,7 @@ Is se narrower or equivalent to te.
 
 */
 func narrowerOrEquivalent(se, te *indexEntry, shortest bool, predFc map[string]value.Value) bool {
+
 	snk, snc := matchedKeysConditions(se, te, shortest, predFc)
 
 	be := bestIndexBySargableKeys(se, te, se.nEqCond, te.nEqCond)
@@ -474,12 +505,42 @@ func narrowerOrEquivalent(se, te *indexEntry, shortest bool, predFc map[string]v
 		return true
 	}
 
+	// if te and se has same sargKeys (or equivalent condition), and there exists
+	// a non-sarged array key, prefer the one without the array key
+	if te.nSargKeys > 0 && te.nSargKeys == snk+snc &&
+		se.PushDownProperty() == te.PushDownProperty() {
+		teHasArrayKey := indexHasArrayIndexKey(te.index)
+		seHasArrayKey := indexHasArrayIndexKey(se.index)
+		if teHasArrayKey != seHasArrayKey {
+			if !hasArrayIndexKey(te.sargKeys) && !hasArrayIndexKey(se.sargKeys) {
+				if teHasArrayKey && !seHasArrayKey {
+					return true
+				} else if seHasArrayKey && !teHasArrayKey {
+					return false
+				}
+			}
+		}
+	}
+
 	if te.cond != nil && (se.cond == nil || !base.SubsetOf(se.cond, te.cond)) {
 		return false
 	}
 
-	if te.nSargKeys > 0 && te.nSargKeys > (snk+snc) {
-		return false
+	if te.nSargKeys > 0 {
+		if te.nSargKeys > (snk + snc) {
+			return false
+		} else if te.nSargKeys == (snk+snc) &&
+			se.PushDownProperty() == te.PushDownProperty() {
+			if se.minKeys != te.minKeys {
+				// for two indexes with the same sargKeys, favor the one
+				// with more consecutive leading sargKeys
+				// e.g (c1, c4) vs (c1, c2, c4) with predicates on c1 and c4
+				return se.minKeys > te.minKeys
+			} else {
+				// favor the one with shorter sargKeys
+				return se.maxKeys <= te.maxKeys
+			}
+		}
 	}
 
 	if se.sumKeys+se.nEqCond != te.sumKeys+te.nEqCond {
@@ -508,27 +569,71 @@ outer:
 
 		for si, sk := range se.sargKeys {
 			if se.skeys[si] {
-				if base.SubsetOf(sk, tk) || sk.DependsOn(tk) {
+				if matchedIndexKey(sk, tk) {
 					nk++
 					continue outer
 				}
 			}
 		}
 
-		/* Count number of matches
-		 * Indexkey is part of other index condition as equality predicate
-		 * If trying to determine shortest index(For: IntersectScan)
-		 *     indexkey is not equality predicate and indexkey is part of other index condition
-		 *     (In case of equality predicate keeping IntersectScan might be better)
-		 */
-		_, condEq := se.condFc[tk.String()]
-		_, predEq := predFc[tk.String()]
-		if condEq || (shortest && !predEq && se.cond != nil && se.cond.DependsOn(tk)) {
+		if matchedIndexCondition(se, tk, predFc, shortest) {
 			nc++
 		}
 	}
 
 	return
+}
+
+// for CBO, prune indexes that has similar leading index keys
+func matchedLeadingKeys(se, te *indexEntry, predFc map[string]value.Value) bool {
+	nkeys := 0
+	ncond := 0
+	for i, tk := range te.sargKeys {
+		if !te.skeys[i] {
+			continue
+		}
+
+		if i >= len(se.sargKeys) {
+			break
+		}
+
+		if !se.skeys[i] {
+			continue
+		}
+
+		sk := se.sargKeys[i]
+		if matchedIndexKey(sk, tk) {
+			nkeys++
+		} else if matchedIndexCondition(se, tk, predFc, true) {
+			ncond++
+		} else {
+			break
+		}
+	}
+
+	return (nkeys + ncond) > 0
+}
+
+func matchedIndexKey(sk, tk expression.Expression) bool {
+	return base.SubsetOf(sk, tk) || sk.DependsOn(tk)
+}
+
+func matchedIndexCondition(se *indexEntry, tk expression.Expression, predFc map[string]value.Value,
+	shortest bool) bool {
+
+	/* Count number of matches
+	 * Indexkey is part of other index condition as equality predicate
+	 * If trying to determine shortest index(For: IntersectScan)
+	 *     indexkey is not equality predicate and indexkey is part of other index condition
+	 *     (In case of equality predicate keeping IntersectScan might be better)
+	 */
+	_, condEq := se.condFc[tk.String()]
+	_, predEq := predFc[tk.String()]
+	if condEq || (shortest && !predEq && se.cond != nil && se.cond.DependsOn(tk)) {
+		return true
+	}
+
+	return false
 }
 
 func (this *builder) sargIndexes(baseKeyspace *base.BaseKeyspace, underHash bool,
@@ -569,10 +674,12 @@ func (this *builder) sargIndexes(baseKeyspace *base.BaseKeyspace, underHash bool
 
 		if useFilters {
 			spans, exactSpans, err = SargForFilters(baseKeyspace.Filters(), se.keys,
-				se.maxKeys, underHash, this.useCBO, baseKeyspace, this.keyspaceNames, advisorValidate)
+				se.maxKeys, underHash, this.useCBO, baseKeyspace, this.keyspaceNames,
+				advisorValidate, this.context)
 		} else {
-			spans, exactSpans, err = SargFor(baseKeyspace.DnfPred(), se.keys,
-				se.maxKeys, orIsJoin, this.useCBO, baseKeyspace, this.keyspaceNames, advisorValidate)
+			spans, exactSpans, err = SargFor(baseKeyspace.DnfPred(), se, se.keys,
+				se.maxKeys, orIsJoin, this.useCBO, baseKeyspace, this.keyspaceNames,
+				advisorValidate, this.context)
 		}
 		if err != nil || spans.Size() == 0 {
 			logging.Errorp("Sargable index not sarged", logging.Pair{"pred", fmt.Sprintf("<ud>%v</ud>", pred)},
@@ -595,7 +702,11 @@ func (this *builder) sargIndexes(baseKeyspace *base.BaseKeyspace, underHash bool
 }
 
 func indexHasArrayIndexKey(index datastore.Index) bool {
-	for _, sk := range index.RangeKey() {
+	return hasArrayIndexKey(index.RangeKey())
+}
+
+func hasArrayIndexKey(keys expression.Expressions) bool {
+	for _, sk := range keys {
 		if isArray, _ := sk.IsArrayIndexKey(); isArray {
 			return true
 		}
@@ -616,7 +727,8 @@ func (this *builder) chooseIntersectScan(sargables map[datastore.Index]*indexEnt
 		nTerms = len(this.order.Terms())
 	}
 
-	return optChooseIntersectScan(keyspace, sargables, nTerms, node.Alias(), this.advisorValidate())
+	return optChooseIntersectScan(keyspace, sargables, nTerms, node.Alias(),
+		this.baseKeyspaces, this.advisorValidate(), this.context)
 }
 
 func bestIndexBySargableKeys(se, te *indexEntry, snc, tnc int) *indexEntry {

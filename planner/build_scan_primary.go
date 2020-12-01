@@ -22,7 +22,7 @@ import (
 func (this *builder) buildPrimaryScan(keyspace datastore.Keyspace, node *algebra.KeyspaceTerm,
 	indexes []datastore.Index, id expression.Expression, force, exact, hasDeltaKeyspace bool) (
 	plan.Operator, error) {
-	primary, err := buildPrimaryIndex(keyspace, indexes, force)
+	primary, err := buildPrimaryIndex(keyspace, indexes, node, force)
 	if primary == nil || err != nil {
 		return nil, err
 	}
@@ -55,7 +55,7 @@ func (this *builder) buildPrimaryScan(keyspace datastore.Keyspace, node *algebra
 		cost := OPT_COST_NOT_AVAIL
 		cardinality := OPT_CARD_NOT_AVAIL
 		if this.useCBO {
-			cost, cardinality = primaryIndexScanCost(primary, this.context.RequestId())
+			cost, cardinality = primaryIndexScanCost(primary, this.context.RequestId(), this.context)
 		}
 		return plan.NewPrimaryScan3(primary3, keyspace, node, this.offset, this.limit,
 			plan.NewIndexProjection(0, true), indexOrder, nil, cost, cardinality, hasDeltaKeyspace), nil
@@ -73,7 +73,7 @@ func (this *builder) buildPrimaryScan(keyspace datastore.Keyspace, node *algebra
 func (this *builder) buildCoveringPrimaryScan(keyspace datastore.Keyspace, node *algebra.KeyspaceTerm,
 	id expression.Expression, indexes []datastore.Index) (plan.Operator, error) {
 
-	primary, err := buildPrimaryIndex(keyspace, indexes, false)
+	primary, err := buildPrimaryIndex(keyspace, indexes, node, false)
 	if err != nil {
 		return nil, err
 	}
@@ -106,7 +106,7 @@ func (this *builder) buildCoveringPrimaryScan(keyspace datastore.Keyspace, node 
 	return op, err
 }
 
-func buildPrimaryIndex(keyspace datastore.Keyspace, indexes []datastore.Index, force bool) (
+func buildPrimaryIndex(keyspace datastore.Keyspace, indexes []datastore.Index, node *algebra.KeyspaceTerm, force bool) (
 	primary datastore.PrimaryIndex, err error) {
 	ok := false
 
@@ -154,8 +154,8 @@ func buildPrimaryIndex(keyspace datastore.Keyspace, indexes []datastore.Index, f
 
 	if primary == nil {
 		return nil, fmt.Errorf(
-			"No index available on keyspace %s that matches your query. Use CREATE INDEX or CREATE PRIMARY INDEX to create an index, or check that your expected index is online.",
-			keyspace.Name())
+			"No index available on keyspace %s that matches your query. Use CREATE PRIMARY INDEX ON %s to create a primary index, or check that your expected index is online.",
+			node.PathString(), node.PathString())
 	}
 
 	return nil, fmt.Errorf("Primary index %s not online.", primary.Name())

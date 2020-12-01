@@ -6,6 +6,7 @@ import "strings"
 import "github.com/couchbase/clog"
 import "github.com/couchbase/query/algebra"
 import "github.com/couchbase/query/datastore"
+import "github.com/couchbase/query/errors"
 import "github.com/couchbase/query/expression"
 import "github.com/couchbase/query/expression/search"
 import "github.com/couchbase/query/functions"
@@ -424,7 +425,7 @@ tokOffset	 int
 
 %type <statement>        stmt_body
 %type <statement>        stmt advise explain prepare execute select_stmt dml_stmt ddl_stmt
-%type <statement>        infer infer_keyspace
+%type <statement>        infer
 %type <statement>        update_statistics
 %type <statement>        insert upsert delete update merge
 %type <statement>        index_stmt create_index drop_index alter_index build_index
@@ -646,22 +647,20 @@ USING construction_expr
 ;
 
 infer:
-infer_keyspace
-;
-
-infer_keyspace:
-INFER opt_keyspace simple_keyspace_ref opt_infer_using opt_infer_ustat_with
+INFER opt_keyspace_collection simple_keyspace_ref opt_infer_using opt_infer_ustat_with
 {
     $$ = algebra.NewInferKeyspace($3, $4, $5)
 }
 ;
 
-opt_keyspace:
+opt_keyspace_collection:
 /* empty */
 {
 }
 |
 KEYSPACE
+|
+COLLECTION
 ;
 
 opt_infer_using:
@@ -1100,12 +1099,10 @@ expr opt_as_alias opt_use
     switch other := $1.(type) {
         case *algebra.Subquery:
             if $2 == "" {
-                 yylex.Error("Subquery in FROM clause must have an alias.")
-	         yylex.(*lexer).Stop()
+                 return yylex.(*lexer).FatalError("Subquery in FROM clause must have an alias.")
             }
             if $3.Keys() != nil || $3.Indexes() != nil {
-                 yylex.Error("FROM Subquery cannot have USE KEYS or USE INDEX.")
-	         yylex.(*lexer).Stop()
+                 return yylex.(*lexer).FatalError("FROM Subquery cannot have USE KEYS or USE INDEX.")
             }
             $$ = algebra.NewSubqueryTerm(other.Select(), $2, $3.JoinHint())
         case *expression.Identifier:
@@ -1120,8 +1117,7 @@ expr opt_as_alias opt_use
                         $$ = algebra.NewExpressionTerm(other, $2, nil, false, $3.JoinHint())
                    }
             } else {
-                   yylex.Error("FROM <placeholder> cannot have USE INDEX.")
-	           yylex.(*lexer).Stop()
+                   return yylex.(*lexer).FatalError("FROM <placeholder> cannot have USE INDEX.")
             }
         case *expression.Field:
 	    path := other.Path()
@@ -1139,8 +1135,7 @@ expr opt_as_alias opt_use
         if $3.Keys() == nil && $3.Indexes() == nil {
             $$ = algebra.NewExpressionTerm($1, $2, nil, false, $3.JoinHint())
         } else {
-            yylex.Error("FROM Expression cannot have USE KEYS or USE INDEX.")
-	    yylex.(*lexer).Stop()
+            return yylex.(*lexer).FatalError("FROM Expression cannot have USE KEYS or USE INDEX.")
         }
     }
 }
@@ -1947,8 +1942,7 @@ function_meta_expr DOT path EQ expr
     if $1 != nil && algebra.IsValidMetaMutatePath($3){
          $$ = algebra.NewSetTerm($3, $5, nil, $1)
     } else if $1 != nil {
-         yylex.Error(fmt.Sprintf("SET clause has invalid path %s",  $3.String()))
-	 yylex.(*lexer).Stop()
+         return yylex.(*lexer).FatalError(fmt.Sprintf("SET clause has invalid path %s",  $3.String()))
     }
 }
 ;
@@ -1961,8 +1955,7 @@ function_name LPAREN opt_exprs RPAREN
     if ok && strings.ToLower($1) == "meta" && len($3) >= f.MinArgs() && len($3) <= f.MaxArgs() {
          $$ = f.Constructor()($3...)
     } else {
-         yylex.Error(fmt.Sprintf("SET clause has invalid path %s", $1))
-	 yylex.(*lexer).Stop()
+         return yylex.(*lexer).FatalError(fmt.Sprintf("SET clause has invalid path %s", $1))
     }
 }
 ;
@@ -2899,6 +2892,61 @@ UPDATE STATISTICS opt_for named_keyspace_ref LPAREN update_stat_terms RPAREN opt
 {
     $$ = algebra.NewUpdateStatistics($4, $6, $8)
 }
+|
+UPDATE STATISTICS opt_for named_keyspace_ref DELETE LPAREN update_stat_terms RPAREN
+{
+    $$ = algebra.NewUpdateStatisticsDelete($4, $7)
+}
+|
+UPDATE STATISTICS opt_for named_keyspace_ref DELETE ALL
+{
+    $$ = algebra.NewUpdateStatisticsDelete($4, nil)
+}
+|
+UPDATE STATISTICS opt_for named_keyspace_ref INDEX LPAREN exprs RPAREN opt_index_using opt_infer_ustat_with
+{
+    $$ = algebra.NewUpdateStatisticsIndex($4, $7, $9, $10)
+}
+|
+UPDATE STATISTICS FOR INDEX simple_named_keyspace_ref DOT index_name opt_index_using opt_infer_ustat_with
+{
+    $$ = algebra.NewUpdateStatisticsIndex($5, expression.Expressions{expression.NewIdentifier($7)}, $8, $9)
+}
+|
+UPDATE STATISTICS FOR INDEX index_name ON named_keyspace_ref opt_index_using opt_infer_ustat_with
+{
+    $$ = algebra.NewUpdateStatisticsIndex($7, expression.Expressions{expression.NewIdentifier($5)}, $8, $9)
+}
+|
+ANALYZE opt_keyspace_collection named_keyspace_ref LPAREN update_stat_terms RPAREN opt_infer_ustat_with
+{
+    $$ = algebra.NewUpdateStatistics($3, $5, $7)
+}
+|
+ANALYZE opt_keyspace_collection named_keyspace_ref DELETE STATISTICS LPAREN update_stat_terms RPAREN
+{
+    $$ = algebra.NewUpdateStatisticsDelete($3, $7)
+}
+|
+ANALYZE opt_keyspace_collection named_keyspace_ref DELETE STATISTICS
+{
+    $$ = algebra.NewUpdateStatisticsDelete($3, nil)
+}
+|
+ANALYZE opt_keyspace_collection named_keyspace_ref INDEX LPAREN exprs RPAREN opt_index_using opt_infer_ustat_with
+{
+    $$ = algebra.NewUpdateStatisticsIndex($3, $6, $8, $9)
+}
+|
+ANALYZE INDEX simple_named_keyspace_ref DOT index_name opt_index_using opt_infer_ustat_with
+{
+    $$ = algebra.NewUpdateStatisticsIndex($3, expression.Expressions{expression.NewIdentifier($5)}, $6, $7)
+}
+|
+ANALYZE INDEX index_name ON named_keyspace_ref opt_index_using opt_infer_ustat_with
+{
+    $$ = algebra.NewUpdateStatisticsIndex($5, expression.Expressions{expression.NewIdentifier($3)}, $6, $7)
+}
 ;
 
 opt_for:
@@ -3578,7 +3626,7 @@ NTH_VALUE LPAREN exprs RPAREN opt_from_first_last opt_nulls_treatment window_fun
             }
         }
     } else {
-        yylex.Error(fmt.Sprintf("Invalid function %s.", fname))
+        return yylex.(*lexer).FatalError(fmt.Sprintf("Invalid function %s", fname))
     }
 }
 |
@@ -3612,12 +3660,14 @@ function_name LPAREN opt_exprs RPAREN opt_filter opt_nulls_treatment opt_window_
             }
         }
     } else {
+	var name functions.FunctionName
+	var err errors.Error
+
         f = nil
         if $5 == nil && $6 == uint32(0) && $7 == nil {
-	     name, err := functions.Constructor([]string{$1}, yylex.(*lexer).Namespace(), yylex.(*lexer).QueryContext())
+	     name, err = functions.Constructor([]string{$1}, yylex.(*lexer).Namespace(), yylex.(*lexer).QueryContext())
 	     if err != nil {
-	         yylex.Error(err.Error())
-	         yylex.(*lexer).Stop()
+	         return yylex.(*lexer).FatalError(err.Error())
 	     }
 	     f = expression.GetUserDefinedFunction(name)
         }
@@ -3625,8 +3675,7 @@ function_name LPAREN opt_exprs RPAREN opt_filter opt_nulls_treatment opt_window_
 	if f != nil {
 		$$ = f.Constructor()($3...)
 	} else {
-		yylex.Error(fmt.Sprintf("Invalid function %s.", $1))
-	    	yylex.(*lexer).Stop()
+		return yylex.(*lexer).FatalError(fmt.Sprintf("Invalid function %s (resolving to %s)", $1, name.Key()))
 	}
     }
 }
@@ -3667,8 +3716,7 @@ long_func_name LPAREN opt_exprs RPAREN
 	if f != nil {
 		$$ = f.Constructor()($3...)
 	} else {
-		yylex.Error(fmt.Sprintf("Invalid function %v", $1))
-		yylex.(*lexer).Stop()
+		return yylex.(*lexer).FatalError(fmt.Sprintf("Invalid function %v", $1.Key()))
 	}
 }
 ;

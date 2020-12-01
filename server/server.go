@@ -136,6 +136,7 @@ type Server struct {
 	whitelist         map[string]interface{}
 	autoPrepare       bool
 	memoryQuota       uint64
+	atrCollection     string
 }
 
 // Default Keep Alive Length
@@ -462,6 +463,7 @@ func (this *Server) SetTxTimeout(timeout time.Duration) {
 		timeout = 0
 	}
 	this.txTimeout = timeout
+	datastore.GetTransactionSettings().SetTxTimeout(timeout)
 }
 
 func (this *Server) Profile() Profile {
@@ -496,6 +498,16 @@ func (this *Server) MemoryQuota() uint64 {
 
 func (this *Server) SetMemoryQuota(memoryQuota uint64) {
 	this.memoryQuota = memoryQuota
+}
+
+func (this *Server) AtrCollection() string {
+	return this.atrCollection
+}
+
+func (this *Server) SetAtrCollection(s string) {
+	this.atrCollection = s
+	datastore.GetTransactionSettings().SetAtrCollection(s)
+
 }
 
 func (this *Server) Enterprise() bool {
@@ -544,7 +556,7 @@ func (this *Server) setupRequestContext(request Request) bool {
 		this.readonly, maxParallelism, request.ScanCap(), request.PipelineCap(), request.PipelineBatch(),
 		request.NamedArgs(), request.PositionalArgs(), request.Credentials(), request.ScanConsistency(),
 		request.ScanVectorSource(), request.Output(), nil, request.IndexApiVersion(), request.FeatureControls(),
-		request.QueryContext(), request.UseFts(), request.UseCBO(), optimizer)
+		request.QueryContext(), request.UseFts(), request.UseCBO(), optimizer, request.KvTimeout())
 	context.SetWhitelist(this.whitelist)
 	context.SetDurability(request.DurabilityLevel(), request.DurabilityTimeout())
 	context.SetScanConsistency(request.ScanConsistency(), request.OriginalScanConsistency())
@@ -866,8 +878,13 @@ func (this *Server) serviceRequest(request Request) {
 
 	context := request.ExecutionContext()
 	if request.TxId() != "" {
+		atrCollection := this.AtrCollection()
+		if request.AtrCollection() != "" {
+			atrCollection = request.AtrCollection()
+		}
 		if err := context.SetTransactionContext(request.Type(), request.TxImplicit(),
-			request.TxTimeout(), this.TxTimeout(), request.TxData()); err != nil {
+			request.TxTimeout(), this.TxTimeout(), atrCollection, request.NumAtrs(),
+			request.TxData()); err != nil {
 			request.Fail(err)
 			request.Failed(this)
 			return
@@ -885,11 +902,14 @@ func (this *Server) serviceRequest(request Request) {
 			(prepared != nil && !prepared.Readonly()) {
 			request.Fail(errors.NewServiceErrorReadonly("The server or request is read-only" +
 				" and cannot accept this write statement."))
-		} else if request.IsPrepare() {
-			context.ResetTxContext()
-		} else if request.TxId() == "" {
+		} else if request.TxId() == "" && !request.IsPrepare() {
+			atrCollection := this.AtrCollection()
+			if request.AtrCollection() != "" {
+				atrCollection = request.AtrCollection()
+			}
 			if err = context.SetTransactionContext(request.Type(), request.TxImplicit(),
-				request.TxTimeout(), this.TxTimeout(), request.TxData()); err != nil {
+				request.TxTimeout(), this.TxTimeout(), atrCollection, request.NumAtrs(),
+				request.TxData()); err != nil {
 				request.Fail(err)
 			}
 		}
@@ -908,6 +928,15 @@ func (this *Server) serviceRequest(request Request) {
 			return
 		}
 	}
+
+	memoryQuota := request.MemoryQuota()
+
+	// never allow request side quota to be higher than
+	// server side quota
+	if this.memoryQuota > 0 && (this.memoryQuota < memoryQuota || memoryQuota == 0) {
+		memoryQuota = this.memoryQuota
+	}
+	context.SetMemoryQuota(memoryQuota)
 
 	context.SetIsPrepared(request.Prepared() != nil)
 	build := time.Now()
@@ -949,15 +978,6 @@ func (this *Server) serviceRequest(request Request) {
 	} else {
 		context.SetReqDeadline(time.Time{})
 	}
-
-	memoryQuota := request.MemoryQuota()
-
-	// never allow request side quota to be higher than
-	// server side quota
-	if this.memoryQuota > 0 && (this.memoryQuota < memoryQuota || memoryQuota == 0) {
-		memoryQuota = this.memoryQuota
-	}
-	context.SetMemoryQuota(memoryQuota)
 
 	request.NotifyStop(operator)
 	request.SetExecTime(time.Now())
@@ -1018,12 +1038,21 @@ func (this *Server) getPrepared(request Request, context *execution.Context) (*p
 			request.SetAutoExecute(value.FALSE)
 		}
 
-		stype := stmt.Type()
-		if estmt, ok := stmt.(*algebra.Explain); ok {
+		var stype string
+		var allow bool
+		switch estmt := stmt.(type) {
+		case *algebra.Explain:
 			stype = estmt.Statement().Type()
+			allow = true
+		case *algebra.Advise:
+			stype = estmt.Statement().Type()
+			allow = true
+		default:
+			stype = stmt.Type()
+			allow = isPrepare && !autoExecute
 		}
 
-		if ok, msg := IsValidStatement(request.TxId(), stype, request.TxImplicit(), isPrepare && !autoExecute); !ok {
+		if ok, msg := IsValidStatement(request.TxId(), stype, request.TxImplicit(), allow); !ok {
 			return nil, errors.NewTranStatementNotSupportedError(stype, msg)
 		}
 
@@ -1274,6 +1303,7 @@ func GetProfile() Profile {
 	return options.Profile()
 }
 
+// FIXME should the IPv6 / host name and port code be in util?
 func IsIPv6() bool {
 	return _IPv6
 }

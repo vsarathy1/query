@@ -39,10 +39,8 @@ import (
 	"github.com/couchbase/query/datastore/couchbase/gcagent"
 	"github.com/couchbase/query/datastore/virtual"
 	"github.com/couchbase/query/errors"
-	"github.com/couchbase/query/expression"
 	"github.com/couchbase/query/logging"
 	"github.com/couchbase/query/server"
-	"github.com/couchbase/query/timestamp"
 	"github.com/couchbase/query/transactions"
 	"github.com/couchbase/query/util"
 	"github.com/couchbase/query/value"
@@ -514,7 +512,6 @@ func (s *store) SetClientConnectionSecurityConfig() (err error) {
 		}
 	}
 	return
-
 }
 
 func (s *store) SetConnectionSecurityConfig(connSecConfig *datastore.ConnectionSecurityConfig) {
@@ -533,6 +530,9 @@ func (s *store) SetConnectionSecurityConfig(connSecConfig *datastore.ConnectionS
 
 			// Make new TLS settings take effect in the buckets.
 			k.cbKeyspace.cbbucket.RefreshFully()
+			if k.cbKeyspace.agentProvider != nil {
+				k.cbKeyspace.agentProvider.Refresh()
+			}
 
 			// Pass new settings to indexers.
 			indexers, _ := k.cbKeyspace.Indexers()
@@ -729,6 +729,7 @@ type namespace struct {
 	store         *store
 	name          string
 	cbNamespace   *cb.Pool
+	last          util.Time // last time we refreshed the pool
 	keyspaceCache map[string]*keyspaceEntry
 	version       uint64
 	lock          sync.RWMutex // lock to guard the keyspaceCache
@@ -747,6 +748,7 @@ const (
 	_MIN_ERR_INTERVAL   time.Duration = 5 * time.Second
 	_THROTTLING_TIMEOUT time.Duration = 10 * time.Millisecond
 	_CLEANUP_INTERVAL   time.Duration = time.Hour
+	_REFRESH_THRESHOLD  time.Duration = 100 * time.Millisecond
 )
 
 func (p *namespace) DatastoreId() string {
@@ -778,13 +780,53 @@ func (p *namespace) KeyspaceNames() ([]string, errors.Error) {
 	return rv, nil
 }
 
-func (p *namespace) Objects() ([]datastore.Object, errors.Error) {
+func (p *namespace) Objects(preload bool) ([]datastore.Object, errors.Error) {
 	p.refresh()
 	p.nslock.RLock()
 	rv := make([]datastore.Object, len(p.cbNamespace.BucketMap))
 	i := 0
+
 	for name, _ := range p.cbNamespace.BucketMap {
-		rv[i] = datastore.Object{name, name, true, true}
+		var defaultCollection datastore.Keyspace
+
+		o := datastore.Object{name, name, false, false}
+		p.lock.RLock()
+		entry := p.keyspaceCache[name]
+		if entry != nil && entry.cbKeyspace != nil {
+			defaultCollection = entry.cbKeyspace.defaultCollection
+		}
+		p.lock.RUnlock()
+
+		if preload && defaultCollection == nil {
+			ks, _ := p.KeyspaceByName(name)
+			if ks != nil {
+				defaultCollection = ks.(*keyspace).defaultCollection
+			}
+		}
+
+		// if we have loaded the bucket, check if the bucket has a default collection
+		// if we haven't loaded the bucket, see if you can get the default collection id
+		// the bucket is a keyspace if the default collection exists
+		if defaultCollection != nil {
+			switch k := defaultCollection.(type) {
+			case *collection:
+				o.IsKeyspace = (k != nil)
+				o.IsBucket = true
+			case *keyspace:
+				o.IsKeyspace = (k != nil)
+				o.IsBucket = false
+			}
+		} else if !preload {
+			bucket, _ := p.cbNamespace.GetBucket(name)
+			if bucket != nil {
+				_, _, err := bucket.GetCollectionCID("_default", "_default", time.Time{})
+				if err == nil {
+					o.IsKeyspace = true
+				}
+			}
+			o.IsBucket = true
+		}
+		rv[i] = o
 		i++
 	}
 	p.nslock.RUnlock()
@@ -841,7 +883,13 @@ func (p *namespace) keyspaceByName(name string) (*keyspace, errors.Error) {
 						if mani.Uid > keyspace.collectionsManifestUid {
 							keyspace.collectionsManifestUid = mani.Uid
 							keyspace.scopes = scopes
-							keyspace.defaultCollection = defaultCollection
+
+							// if there's no scopes fall back to bucket access
+							if len(scopes) == 0 {
+								keyspace.defaultCollection = keyspace
+							} else {
+								keyspace.defaultCollection = defaultCollection
+							}
 							keyspace.flags = 0
 						}
 					}
@@ -993,6 +1041,10 @@ func (p *namespace) getPool() *cb.Pool {
 }
 
 func (p *namespace) refresh() {
+	if util.Since(p.last) < _REFRESH_THRESHOLD {
+		return
+	}
+
 	// trigger refresh of this pool
 	logging.Debugf("Refreshing pool %s", p.name)
 
@@ -1001,6 +1053,7 @@ func (p *namespace) refresh() {
 		newpool, err = p.reload1(err)
 		if err == nil {
 			p.reload2(&newpool)
+			p.last = util.Now()
 		}
 		return
 	}
@@ -1022,6 +1075,7 @@ func (p *namespace) refresh() {
 	p.nslock.RUnlock()
 	if changed {
 		p.reload2(&newpool)
+		p.last = util.Now()
 		return
 	}
 	newpool.Close()
@@ -1029,7 +1083,7 @@ func (p *namespace) refresh() {
 	p.lock.Lock()
 	for _, ks := range p.keyspaceCache {
 
-		// in case a change has kicked in in between checking bucketMaps and cquiring the lock
+		// in case a change has kicked in in between checking bucketMaps and acquiring the lock
 		if ks.cbKeyspace == nil {
 			continue
 		}
@@ -1045,6 +1099,7 @@ func (p *namespace) refresh() {
 		}
 	}
 	p.lock.Unlock()
+	p.last = util.Now()
 }
 
 func (p *namespace) reload() {
@@ -1161,10 +1216,10 @@ type keyspace struct {
 	namespace      *namespace
 	name           string
 	fullName       string
+	uidString      string
 	cbbucket       *cb.Bucket
 	agentProvider  *gcagent.AgentProvider
 	flags          int
-	viewIndexer    datastore.Indexer // View index provider
 	gsiIndexer     datastore.Indexer // GSI index provider
 	ftsIndexer     datastore.Indexer // FTS index provider
 	chkIndex       chkIndexDict
@@ -1213,6 +1268,7 @@ func newKeyspace(p *namespace, name string) (*keyspace, errors.Error) {
 		namespace: p,
 		name:      name,
 		fullName:  p.Name() + ":" + name,
+		uidString: cbbucket.UUID,
 		cbbucket:  cbbucket,
 	}
 
@@ -1304,6 +1360,10 @@ func (b *keyspace) Name() string {
 	return b.name
 }
 
+func (b *keyspace) Uid() string {
+	return b.uidString
+}
+
 // keyspace (as a bucket) implements KeyspaceMetadata
 func (b *keyspace) MetadataVersion() uint64 {
 
@@ -1367,8 +1427,6 @@ func (b *keyspace) Indexer(name datastore.IndexType) (datastore.Indexer, errors.
 			return b.ftsIndexer, nil
 		}
 		return nil, errors.NewCbIndexerNotImplementedError(nil, fmt.Sprintf("FTS may not be enabled"))
-	case datastore.VIEW:
-		return b.viewIndexer, nil
 	default:
 		return nil, errors.NewCbIndexerNotImplementedError(nil, fmt.Sprintf("Type %s", name))
 	}
@@ -1387,9 +1445,6 @@ func (b *keyspace) Indexers() ([]datastore.Indexer, errors.Error) {
 		indexers = append(indexers, b.ftsIndexer)
 	}
 
-	if b.viewIndexer != nil {
-		indexers = append(indexers, b.viewIndexer)
-	}
 	return indexers, err
 }
 
@@ -1426,6 +1481,11 @@ func (k *keyspace) getRandomEntry(scopeName, collectionName string,
 
 	if err != nil {
 		k.checkRefresh(err)
+
+		// Ignore "Not found" errors
+		if isNotFoundError(err) {
+			return "", nil, nil
+		}
 		return "", nil, errors.NewCbGetRandomEntryError(err)
 	}
 
@@ -1724,6 +1784,9 @@ func (b *keyspace) performOp(op MutateOp, qualifiedName, scopeName, collectionNa
 
 		key := kv.Name
 		if op != MOP_DELETE {
+			if kv.Value.Type() == value.BINARY {
+				return nil, errors.NewBinaryDocumentMutationError(_MutateOpNames[op], key)
+			}
 			val = kv.Value.ActualForIndex()
 			exptime = int(getExpiration(kv.Options))
 		}
@@ -1888,11 +1951,6 @@ func (b *keyspace) loadIndexes() {
 	}
 	p := b.namespace
 	store := p.store
-	b.viewIndexer = newViewIndexer(b)
-	viewIndexer := b.viewIndexer.(*viewIndexer)
-	if err := viewIndexer.loadViewIndexes(); err != nil {
-		logging.Warnf("Error loading indexes for keyspace %s, Error %v", b.name, err)
-	}
 
 	b.gsiIndexer, qerr = gsi.NewGSIIndexer(p.store.URL(), p.Name(), b.name, store.connSecConfig)
 	if qerr != nil {
@@ -1997,62 +2055,6 @@ func (ks *keyspace) Flush() errors.Error {
 
 func (b *keyspace) IsBucket() bool {
 	return true
-}
-
-// primaryIndex performs full keyspace scans.
-type primaryIndex struct {
-	viewIndex
-}
-
-func (pi *primaryIndex) KeyspaceId() string {
-	return pi.keyspace.Id()
-}
-
-func (pi *primaryIndex) Id() string {
-	return pi.Name()
-}
-
-func (pi *primaryIndex) Name() string {
-	return pi.name
-}
-
-func (pi *primaryIndex) Type() datastore.IndexType {
-	return pi.viewIndex.Type()
-}
-
-func (pi *primaryIndex) SeekKey() expression.Expressions {
-	return pi.viewIndex.SeekKey()
-}
-
-func (pi *primaryIndex) RangeKey() expression.Expressions {
-	return pi.viewIndex.RangeKey()
-}
-
-func (pi *primaryIndex) Condition() expression.Expression {
-	return pi.viewIndex.Condition()
-}
-
-func (pi *primaryIndex) State() (state datastore.IndexState, msg string, err errors.Error) {
-	return pi.viewIndex.State()
-}
-
-func (pi *primaryIndex) Statistics(requestId string, span *datastore.Span) (
-	datastore.Statistics, errors.Error) {
-	return pi.viewIndex.Statistics(requestId, span)
-}
-
-func (pi *primaryIndex) Drop(requestId string) errors.Error {
-	return pi.viewIndex.Drop(requestId)
-}
-
-func (pi *primaryIndex) Scan(requestId string, span *datastore.Span, distinct bool, limit int64,
-	cons datastore.ScanConsistency, vector timestamp.Vector, conn *datastore.IndexConnection) {
-	pi.viewIndex.Scan(requestId, span, distinct, limit, cons, vector, conn)
-}
-
-func (pi *primaryIndex) ScanEntries(requestId string, limit int64, cons datastore.ScanConsistency,
-	vector timestamp.Vector, conn *datastore.IndexConnection) {
-	pi.viewIndex.ScanEntries(requestId, limit, cons, vector, conn)
 }
 
 func getCollectionId(clientContext ...*memcached.ClientContext) uint32 {

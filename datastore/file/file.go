@@ -277,7 +277,7 @@ func (p *namespace) KeyspaceNames() ([]string, errors.Error) {
 	return p.keyspaceNames, nil
 }
 
-func (p *namespace) Objects() ([]datastore.Object, errors.Error) {
+func (p *namespace) Objects(preload bool) ([]datastore.Object, errors.Error) {
 	rv := make([]datastore.Object, len(p.keyspaceNames))
 	i := 0
 	for _, k := range p.keyspaceNames {
@@ -396,6 +396,10 @@ func (b *keyspace) Name() string {
 	return b.name
 }
 
+func (b *keyspace) Uid() string {
+	return b.name
+}
+
 func (b *keyspace) QualifiedName() string {
 	return b.namespace.name + ":" + b.name
 }
@@ -452,7 +456,7 @@ func (b *keyspace) Fetch(keys []string, keysMap map[string]value.AnnotatedValue,
 		item, e := b.fetchOne(k)
 
 		if e != nil {
-			if os.IsNotExist(e.Cause()) {
+			if os.IsNotExist(e.GetICause()) {
 				// file doesn't exist => key denotes non-existent doc => ignore it
 				continue
 			}

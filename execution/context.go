@@ -63,6 +63,9 @@ const (
 	FTS_SEARCH
 	UPDATE_STAT
 
+	// Expression layer
+	ADVISOR
+
 	// Server layer
 	INSTANTIATE
 	PARSE
@@ -102,6 +105,8 @@ var _PHASE_NAMES = []string{
 	FTS_SEARCH:   "ftsSearch",
 	UPDATE_STAT:  "updateStatistics",
 
+	ADVISOR: "advisor",
+
 	INSTANTIATE: "instantiate",
 	PARSE:       "parse",
 	PLAN:        "plan",
@@ -132,6 +137,11 @@ type Output interface {
 	FmtOptimizerEstimates(op Operator) map[string]interface{}
 	TrackMemory(size uint64)
 }
+
+// context flags
+const (
+	CONTEXT_IS_ADVISOR = 1 << iota // Advisor() function
+)
 
 type Context struct {
 	inUseMemory         uint64
@@ -178,6 +188,10 @@ type Context struct {
 	txImplicit          bool
 	txData              []byte
 	txDataVal           value.Value
+	atrCollection       string
+	numAtrs             int
+	kvTimeout           time.Duration
+	flags               uint32
 }
 
 func NewContext(requestId string, datastore datastore.Datastore, systemstore datastore.Systemstore,
@@ -186,7 +200,7 @@ func NewContext(requestId string, datastore datastore.Datastore, systemstore dat
 	credentials *auth.Credentials, consistency datastore.ScanConsistency,
 	scanVectorSource timestamp.ScanVectorSource, output Output,
 	prepared *plan.Prepared, indexApiVersion int, featureControls uint64, queryContext string,
-	useFts, useCBO bool, optimizer planner.Optimizer) *Context {
+	useFts, useCBO bool, optimizer planner.Optimizer, kvTimeout time.Duration) *Context {
 
 	rv := &Context{
 		requestId:        requestId,
@@ -215,6 +229,7 @@ func NewContext(requestId string, datastore datastore.Datastore, systemstore dat
 		useCBO:           useCBO,
 		optimizer:        optimizer,
 		inlistHashMap:    nil,
+		kvTimeout:        kvTimeout,
 	}
 
 	if rv.maxParallelism <= 0 || rv.maxParallelism > runtime.NumCPU() {
@@ -253,6 +268,10 @@ func (this *Context) Copy() *Context {
 		txContext:           this.txContext,
 		txData:              this.txData,
 		txDataVal:           this.txDataVal,
+		kvTimeout:           this.kvTimeout,
+		atrCollection:       this.atrCollection,
+		numAtrs:             this.numAtrs,
+		flags:               this.flags,
 	}
 
 	rv.SetDurability(this.DurabilityLevel(), this.DurabilityTimeout())
@@ -599,6 +618,8 @@ func (this *Context) SetTransactionInfo(txId string, txStmtNum int64) (err error
 		this.consistency = txContext.TxScanConsistency()
 	}
 	this.SetDurability(txContext.TxDurabilityLevel(), txContext.TxDurabilityTimeout())
+	this.atrCollection = txContext.AtrCollection()
+	this.numAtrs = txContext.NumAtrs()
 
 	this.txImplicit = false
 	if txStmtNum > 0 {
@@ -613,11 +634,11 @@ func (this *Context) SetTransactionInfo(txId string, txStmtNum int64) (err error
 }
 
 func (this *Context) SetTransactionContext(stmtType string, txImplicit bool, rTxTimeout, sTxTimeout time.Duration,
-	txData []byte) (err errors.Error) {
+	atrCollection string, numAtrs int, txData []byte) (err errors.Error) {
 
 	if this.txContext != nil || txImplicit || stmtType == "START_TRANSACTION" {
 		this.txData = txData
-		if len(txData) > 0 && stmtType != "START_TRANSACTION" {
+		if len(txData) > 0 {
 			this.txDataVal = value.NewValue(txData)
 		}
 
@@ -627,6 +648,8 @@ func (this *Context) SetTransactionContext(stmtType string, txImplicit bool, rTx
 				rTxTimeout = sTxTimeout
 			}
 			this.txTimeout = rTxTimeout
+			this.atrCollection = atrCollection
+			this.numAtrs = numAtrs
 
 			if stmtType != "START_TRANSACTION" {
 				// start implicit transaction
@@ -712,7 +735,7 @@ func (this *Context) EvaluateSubquery(query *algebra.Select, parent value.Value)
 				}
 
 				// Cache plan
-				this.prepared.SetSubqueryPlan(query, subplanIsks, subplan)
+				this.prepared.SetSubqueryPlan(query, subplan, subplanIsks)
 				planFound = true
 			}
 			this.prepared.Unlock()
@@ -957,4 +980,12 @@ func (this *Context) RemoveInlistHash(in *expression.In) {
 		}
 	}
 	this.inlistHashLock.Unlock()
+}
+
+func (this *Context) SetAdvisor() {
+	this.flags |= CONTEXT_IS_ADVISOR
+}
+
+func (this *Context) IsAdvisor() bool {
+	return (this.flags & CONTEXT_IS_ADVISOR) != 0
 }

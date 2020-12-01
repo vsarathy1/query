@@ -27,7 +27,7 @@ func NewTransactionError(e error, msg string) Error {
 
 func NewMemoryAllocationError(msg string) Error {
 	return &err{level: EXCEPTION, ICode: 17098, IKey: "nomemory",
-		InternalMsg:    fmt.Sprintf("Memory allocation errorr: %s", msg),
+		InternalMsg:    fmt.Sprintf("Memory allocation error: %s", msg),
 		InternalCaller: CallerN(1)}
 }
 
@@ -67,22 +67,31 @@ func NewTranStatementOutOfOrderError(prev, cur int64) Error {
 		InternalCaller: CallerN(1)}
 }
 
-func NewStartTransactionError(e error) Error {
+func NewStartTransactionError(e error, c interface{}) Error {
+	msg := "Start Transaction statement error"
+	if e != nil {
+		msg = fmt.Sprintf("%s: %v", msg, e)
+	}
 	return &err{level: EXCEPTION, ICode: 17006, IKey: "transaction.statement.start",
-		InternalMsg:    fmt.Sprintf("Start Transaction statement error: %v", e),
-		InternalCaller: CallerN(1)}
+		InternalMsg: msg, InternalCaller: CallerN(1), cause: c}
 }
 
-func NewCommitTransactionError(e error, diagnostics interface{}) Error {
+func NewCommitTransactionError(e error, c interface{}) Error {
+	msg := "Commit Transaction statement error"
+	if e != nil {
+		msg = fmt.Sprintf("%s: %v", msg, e)
+	}
 	return &err{level: EXCEPTION, ICode: 17007, IKey: "transaction.statement.commit",
-		InternalMsg:    fmt.Sprintf("Commit Transaction statement error: %v", e),
-		InternalCaller: CallerN(1), diagnostics: diagnostics}
+		InternalMsg: msg, InternalCaller: CallerN(1), cause: c}
 }
 
-func NewRollbackTransactionError(e error, diagnostics interface{}) Error {
+func NewRollbackTransactionError(e error, c interface{}) Error {
+	msg := "Rollback Transaction statement error"
+	if e != nil {
+		msg = fmt.Sprintf("%s: %v", msg, e)
+	}
 	return &err{level: EXCEPTION, ICode: 17008, IKey: "transaction.statement.rollback",
-		InternalMsg:    fmt.Sprintf("Rollback Transaction statement error: %v", e),
-		InternalCaller: CallerN(1), diagnostics: diagnostics}
+		InternalMsg: msg, InternalCaller: CallerN(1), cause: c}
 }
 
 func NewNoSavepointError(msg string) Error {
@@ -118,5 +127,17 @@ func NewTransactionQueueFull() Error {
 func NewTransactionInuse() Error {
 	return &err{level: EXCEPTION, ICode: 17013, IKey: "transaction.parallel.disallowed",
 		InternalMsg:    "Parallel execution of the statements are not allowed within the transaction",
+		InternalCaller: CallerN(1)}
+}
+
+func NewKeyNotFoundError(k string, c interface{}) Error {
+	return &err{level: EXCEPTION, ICode: 17014, IKey: "transaction.statement.keynotfound",
+		InternalMsg:    fmt.Sprintf("Key not found : %v", k),
+		InternalCaller: CallerN(1), cause: c}
+}
+
+func NewCasMissmatch(op, key string, aCas, eCas uint64) Error {
+	return &err{level: EXCEPTION, ICode: 17015, IKey: "transaction.statement.keynotfound",
+		InternalMsg:    fmt.Sprintf("%s cas (actual:%v, expected:%v) missmatch for key: %v", op, aCas, eCas, key),
 		InternalCaller: CallerN(1)}
 }

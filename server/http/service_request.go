@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
@@ -140,8 +141,9 @@ func newHttpRequest(rv *httpRequest, resp http.ResponseWriter, req *http.Request
 
 		rv.SetNamedArgs(httpArgs.getNamedArgs())
 		creds, err = getCredentials(httpArgs, req.Header["Authorization"])
-		creds.HttpRequest = req
+
 		if err == nil {
+			creds.HttpRequest = req
 			rv.SetCredentials(creds)
 
 			if rv.consCnt > 0 {
@@ -615,9 +617,45 @@ func handleDurabilityTimeout(rv *httpRequest, httpArgs httpRequestArgs, parm str
 }
 
 func handleTxData(rv *httpRequest, httpArgs httpRequestArgs, parm string, val interface{}) errors.Error {
-	txData, err := httpArgs.getStringVal(parm, val)
-	if err == nil && txData != "" {
-		rv.SetTxData([]byte(txData))
+	txData, err := httpArgs.getTxData(parm, val)
+	if err == nil && len(txData) > 0 {
+		rv.SetTxData(txData)
+	}
+	return err
+}
+
+func handleKvTimeout(rv *httpRequest, httpArgs httpRequestArgs, parm string, val interface{}) errors.Error {
+	var timeout time.Duration
+
+	t, err := httpArgs.getStringVal(parm, val)
+	if err == nil && t != "" {
+		timeout, err = newDuration(t)
+		if err == nil {
+			rv.SetKvTimeout(timeout)
+		}
+	}
+
+	return err
+}
+
+func handleAtrCollection(rv *httpRequest, httpArgs httpRequestArgs, parm string, val interface{}) errors.Error {
+	s, err := httpArgs.getStringVal(parm, val)
+	if err == nil && s != "" {
+		rv.SetAtrCollection(s)
+	}
+
+	return err
+}
+
+func handleNumAtrs(rv *httpRequest, httpArgs httpRequestArgs, parm string, val interface{}) errors.Error {
+	param, err := httpArgs.getStringVal(parm, val)
+	if err == nil && param != "" {
+		n, e := strconv.ParseUint(param, 0, 64)
+		if e != nil || n <= 0 || n >= (1<<16) {
+			err = errors.NewServiceErrorBadValue(go_errors.New("number of Atrs is invalid"), param)
+		} else {
+			rv.SetNumAtrs(int(n))
+		}
 	}
 	return err
 }
@@ -676,6 +714,18 @@ func (this *httpRequest) EventRemoteAddress() string {
 	return this.req.RemoteAddr
 }
 
+// for audit.Auditable interface.
+func (this *httpRequest) EventLocalAddress() string {
+	ctx := this.req.Context()
+	if ctx != nil {
+		addr, ok := ctx.Value(http.LocalAddrContextKey).(net.Addr)
+		if ok && addr != nil {
+			return addr.String()
+		}
+	}
+	return ""
+}
+
 const ( // Request argument names
 	MAX_PARALLELISM    = "max_parallelism"
 	SCAN_CAP           = "scan_cap"
@@ -717,6 +767,9 @@ const ( // Request argument names
 	TXDATA             = "txdata"
 	DURABILITY_LEVEL   = "durability_level"
 	DURABILITY_TIMEOUT = "durability_timeout"
+	KVTIMEOUT          = "kvtimeout"
+	ATRCOLLECTION      = "atrcollection"
+	NUMATRS            = "numatrs"
 )
 
 type argHandler struct {
@@ -766,6 +819,9 @@ var _PARAMETERS = map[string]*argHandler{
 	TXDATA:             {handleTxData, false},
 	DURABILITY_LEVEL:   {handleDurabilityLevel, false},
 	DURABILITY_TIMEOUT: {handleDurabilityTimeout, false},
+	KVTIMEOUT:          {handleKvTimeout, false},
+	ATRCOLLECTION:      {handleAtrCollection, false},
+	NUMATRS:            {handleNumAtrs, false},
 }
 
 // common storage for the httpArgs implementations
@@ -1031,6 +1087,7 @@ type httpRequestArgs interface {
 	getCredentials() ([]map[string]string, errors.Error)
 	getScanVector() (timestamp.Vector, errors.Error)
 	getScanVectors() (map[string]timestamp.Vector, errors.Error)
+	getTxData(parm string, val interface{}) ([]byte, errors.Error)
 }
 
 // urlArgs is an implementation of httpRequestArgs that reads
@@ -1052,6 +1109,12 @@ func newUrlArgs(req *http.Request, urlArgs *urlArgs) errors.Error {
 
 	for arg, val := range req.Form {
 		newArg := util.TrimSpace(arg)
+
+		// ignore empty parameters
+		if newArg == "" {
+			delete(req.Form, arg)
+			continue
+		}
 		if newArg[0] == '$' {
 			delete(req.Form, arg)
 			switch len(val) {
@@ -1066,10 +1129,6 @@ func newUrlArgs(req *http.Request, urlArgs *urlArgs) errors.Error {
 			continue
 		}
 
-		// ignore empty parameters
-		if newArg == "" {
-			continue
-		}
 		lowerArg := strings.ToLower(newArg)
 		pType := _PARAMETERS[lowerArg]
 		if pType == nil {
@@ -1160,6 +1219,29 @@ func (this *urlArgs) getPositionalArgs(parm string, val interface{}) (value.Valu
 	}
 
 	return positionalArgs, nil
+}
+
+func (this *urlArgs) getTxData(parm string, val interface{}) ([]byte, errors.Error) {
+	txData, err := this.checkFormValue(parm, val)
+	if err != nil {
+		return nil, err
+	}
+
+	var target interface{}
+	err1 := json.Unmarshal([]byte(txData), &target)
+	if err1 != nil {
+		return nil, errors.NewServiceErrorBadValue(err1, TXDATA)
+	}
+
+	if rval, ok := target.(map[string]interface{}); ok {
+		if err1 := txDataValidation(rval); err1 != nil {
+			return nil, errors.NewServiceErrorBadValue(err1, TXDATA)
+		}
+	} else {
+		return nil, errors.NewServiceErrorBadValue(go_errors.New("txdata is invalid"), TXDATA)
+	}
+
+	return []byte(txData), nil
 }
 
 // Note: This function has no receiver, which makes it easier to test.
@@ -1457,6 +1539,23 @@ func (this *jsonArgs) getPositionalArgs(parm string, val interface{}) (value.Val
 	}
 
 	return positionalArgs, nil
+}
+
+func (this *jsonArgs) getTxData(parm string, val interface{}) (txData []byte, err errors.Error) {
+	var err1 error
+	if rval, ok := val.(map[string]interface{}); ok {
+		err1 = txDataValidation(rval)
+		if err1 == nil {
+			txData, err1 = json.Marshal(rval)
+			if err1 == nil {
+				return txData, nil
+			}
+		}
+	} else {
+		err1 = go_errors.New("txdata is invalid")
+	}
+
+	return nil, errors.NewServiceErrorBadValue(err1, TXDATA)
 }
 
 func (this *jsonArgs) getCredentials() ([]map[string]string, errors.Error) {
@@ -1897,4 +1996,51 @@ func newDuration(s string) (duration time.Duration, err errors.Error) {
 		}
 	}
 	return
+}
+
+/*
+   txdata is internal SDK query parameter object. No way to prevent REST API by setting.
+   So validate the fields loosely so that random fields are not allowed.
+   This is mainly for restore the suspended transaction. SDK should not allowed to control the
+   behavior of the transaction. Also used for SDK transformed KV operations. Those are part of N1QL.
+   Any additional fields must carefully thought through, so that future N1QL functionality will not impact.
+   At present this approach may break backward compatibility (i.e. If N1QL decided move commit protocol different
+   approach it makes impossible because it required document access. But due to performance reason it has been decided
+   to keep this way. One alternative is read the documents xattr and replay on new approach). At the same time
+   any additions should be evaluated keep this in mind.
+   opaque is SDKs opaque data. No backward compatibility will be provided.
+   txnMeta is generated by transactional library, skip the validation.
+   (state, timeLeftMillis, config, numAtrs, durabilityLevel, kvTimeoutMs) are temporary and will be removed once SDK moved to
+   query parameters.
+*/
+
+var validTxDataFields = map[string]bool{"id": true, "txn": true, "atmpt": true, "atr": true,
+	"mutations": true, "bkt": true, "scp": true, "coll": true, "cas": true, "type": true,
+	"kv": true, "scas": true, "txnMeta": false, "opaque": false,
+	"state": true, "timeLeftMillis": true, "config": true, "numAtrs": true, "durabilityLevel": true, "kvTimeoutMs": true}
+
+func txDataValidation(tgt interface{}) (err error) {
+
+	return nil
+
+	if obj, ok := tgt.(map[string]interface{}); ok {
+		for s, v := range obj {
+			mv, ok := validTxDataFields[s]
+			if !ok {
+				return fmt.Errorf("%s field is not allowed", s)
+			} else if ok && mv {
+				if err = txDataValidation(v); err != nil {
+					return err
+				}
+			}
+		}
+	} else if av, ok := tgt.([]interface{}); ok {
+		for _, v := range av {
+			if err = txDataValidation(v); err != nil {
+				return err
+			}
+		}
+	}
+
+	return nil
 }

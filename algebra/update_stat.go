@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 
 	"github.com/couchbase/query/auth"
+	"github.com/couchbase/query/datastore"
 	"github.com/couchbase/query/errors"
 	"github.com/couchbase/query/expression"
 	"github.com/couchbase/query/value"
@@ -27,13 +28,41 @@ type UpdateStatistics struct {
 	keyspace *KeyspaceRef           `json:"keyspace"`
 	terms    expression.Expressions `json:"terms"`
 	with     value.Value            `json:"with"`
+	indexes  expression.Expressions `json:"indexes"`
+	using    datastore.IndexType    `json:"using"`
+	delete   bool                   `json:"delete"`
 }
 
-func NewUpdateStatistics(keyspace *KeyspaceRef, terms expression.Expressions, with value.Value) *UpdateStatistics {
+func NewUpdateStatistics(keyspace *KeyspaceRef, terms expression.Expressions,
+	with value.Value) *UpdateStatistics {
 	rv := &UpdateStatistics{
 		keyspace: keyspace,
 		terms:    terms,
 		with:     with,
+	}
+
+	rv.stmt = rv
+	return rv
+}
+
+func NewUpdateStatisticsIndex(keyspace *KeyspaceRef, indexes expression.Expressions,
+	using datastore.IndexType, with value.Value) *UpdateStatistics {
+	rv := &UpdateStatistics{
+		keyspace: keyspace,
+		with:     with,
+		indexes:  indexes,
+		using:    using,
+	}
+
+	rv.stmt = rv
+	return rv
+}
+
+func NewUpdateStatisticsDelete(keyspace *KeyspaceRef, terms expression.Expressions) *UpdateStatistics {
+	rv := &UpdateStatistics{
+		keyspace: keyspace,
+		terms:    terms,
+		delete:   true,
 	}
 
 	rv.stmt = rv
@@ -49,23 +78,42 @@ func (this *UpdateStatistics) Signature() value.Value {
 }
 
 func (this *UpdateStatistics) Formalize() error {
-	f := expression.NewKeyspaceFormalizer(this.keyspace.Keyspace(), nil)
-	return this.MapExpressions(f)
-}
-
-func (this *UpdateStatistics) MapExpressions(mapper expression.Mapper) (err error) {
-	for i, term := range this.Expressions() {
-		this.terms[i], err = mapper.Map(term)
+	// terms and indexes are mutually exclusive
+	if len(this.terms) > 0 {
+		f := expression.NewKeyspaceFormalizer(this.keyspace.Keyspace(), nil)
+		err := this.terms.MapExpressions(f)
 		if err != nil {
-			return
+			return err
+		}
+	} else if len(this.indexes) > 0 {
+		f := expression.NewFormalizer("", nil)
+		for i, e := range this.indexes {
+			if ei, ok := e.(*expression.Identifier); ok {
+				this.indexes[i] = expression.NewConstant(ei.Identifier())
+			} else {
+				expr, err := f.Map(e)
+				if err != nil {
+					return err
+				}
+				this.indexes[i] = expr
+			}
 		}
 	}
+	return nil
+}
 
-	return
+func (this *UpdateStatistics) MapExpressions(mapper expression.Mapper) error {
+	// terms and indexes are mutually exclusive
+	if len(this.terms) > 0 {
+		return this.terms.MapExpressions(mapper)
+	} else if len(this.indexes) > 0 {
+		return this.indexes.MapExpressions(mapper)
+	}
+	return nil
 }
 
 func (this *UpdateStatistics) Expressions() expression.Expressions {
-	return this.terms
+	return append(this.terms, this.indexes...)
 }
 
 func (this *UpdateStatistics) Privileges() (*auth.Privileges, errors.Error) {
@@ -76,6 +124,10 @@ func (this *UpdateStatistics) Privileges() (*auth.Privileges, errors.Error) {
 
 	for _, term := range this.terms {
 		privs.AddAll(term.Privileges())
+	}
+
+	for _, index := range this.indexes {
+		privs.AddAll(index.Privileges())
 	}
 
 	return privs, nil
@@ -93,11 +145,26 @@ func (this *UpdateStatistics) With() value.Value {
 	return this.with
 }
 
+func (this *UpdateStatistics) Indexes() expression.Expressions {
+	return this.indexes
+}
+
+func (this *UpdateStatistics) Using() datastore.IndexType {
+	return this.using
+}
+
+func (this *UpdateStatistics) Delete() bool {
+	return this.delete
+}
+
 func (this *UpdateStatistics) MarshalJSON() ([]byte, error) {
 	r := map[string]interface{}{"type": "updateStatistics"}
 	r["keyspaceRef"] = this.keyspace
 	r["terms"] = this.terms
 	r["with"] = this.with
+	r["indexes"] = this.indexes
+	r["using"] = this.using
+	r["delete"] = this.delete
 
 	return json.Marshal(r)
 }

@@ -45,8 +45,8 @@ func DictCacheEntryDo(k string, f func(interface{})) {
 	dictionary.DictCacheEntryDo(k, f)
 }
 
-func DropDictCacheEntry(keyspace string) {
-	dictionary.DropDictCacheEntry(keyspace)
+func DropDictCacheEntry(keyspace string, remote bool) {
+	dictionary.DropDictCacheEntry(keyspace, remote)
 }
 
 func NameDictCacheEntries() []string {
@@ -73,6 +73,10 @@ func Foreach(f func(string) error) error {
 
 func DropDictionaryEntry(keyspace string) {
 	dictionary.DropDictionaryEntry(keyspace)
+}
+
+func DropDictEntryAndAllCache(keyspace string, context interface{}) {
+	dictionary.DropDictEntryAndAllCache(keyspace, context)
 }
 
 const _GRACE_PERIOD = time.Second

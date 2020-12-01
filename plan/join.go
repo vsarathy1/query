@@ -23,6 +23,7 @@ type Join struct {
 	keyspace    datastore.Keyspace
 	term        *algebra.KeyspaceTerm
 	outer       bool
+	onFilter    expression.Expression
 	cost        float64
 	cumCost     float64
 	cardinality float64
@@ -38,11 +39,13 @@ func NewJoin(keyspace datastore.Keyspace, join *algebra.Join, cost, cardinality 
 	}
 }
 
-func NewJoinFromAnsi(keyspace datastore.Keyspace, term *algebra.KeyspaceTerm, outer bool, cost, cardinality float64) *Join {
+func NewJoinFromAnsi(keyspace datastore.Keyspace, term *algebra.KeyspaceTerm, outer bool,
+	onFilter expression.Expression, cost, cardinality float64) *Join {
 	return &Join{
 		keyspace:    keyspace,
 		term:        term,
 		outer:       outer,
+		onFilter:    onFilter,
 		cost:        cost,
 		cumCost:     0,
 		cardinality: cardinality,
@@ -80,6 +83,10 @@ func (this *Join) Outer() bool {
 	return this.outer
 }
 
+func (this *Join) OnFilter() expression.Expression {
+	return this.onFilter
+}
+
 func (this *Join) Cost() float64 {
 	if this.cumCost > 0 {
 		return this.cumCost // to maintain compatibility between new join enum code and current explain
@@ -112,9 +119,14 @@ func (this *Join) MarshalBase(f func(map[string]interface{})) map[string]interfa
 		r["as"] = this.term.As()
 	}
 
+	if this.onFilter != nil {
+		r["on_filter"] = expression.NewStringer().Visit(this.onFilter)
+	}
+
 	if this.Cost() > 0.0 {
 		r["cost"] = this.Cost()
 	}
+
 	if this.cardinality > 0.0 {
 		r["cardinality"] = this.cardinality
 	}
@@ -135,6 +147,7 @@ func (this *Join) UnmarshalJSON(body []byte) error {
 		On          string  `json:"on_keys"`
 		Outer       bool    `json:"outer"`
 		As          string  `json:"as"`
+		OnFilter    string  `json:"on_filter"`
 		Cost        float64 `json:"cost"`
 		Cardinality float64 `json:"cardinality"`
 	}
@@ -159,6 +172,13 @@ func (this *Join) UnmarshalJSON(body []byte) error {
 	this.keyspace, err = datastore.GetKeyspace(this.term.Path().Parts()...)
 	if err != nil {
 		return err
+	}
+
+	if _unmarshalled.OnFilter != "" {
+		this.onFilter, err = parser.Parse(_unmarshalled.OnFilter)
+		if err != nil {
+			return err
+		}
 	}
 
 	this.cost = getCost(_unmarshalled.Cost)

@@ -42,7 +42,7 @@ func DictCacheEntryDo(k string, f func(interface{})) {
 	// no-op
 }
 
-func DropDictCacheEntry(keyspace string) {
+func DropDictCacheEntry(keyspace string, remote bool) {
 	// no-op
 }
 
@@ -65,6 +65,10 @@ func Foreach(f func(string) error) error {
 }
 
 func DropDictionaryEntry(keyspace string) {
+	// no-op
+}
+
+func DropDictEntryAndAllCache(keyspace string, context interface{}) {
 	// no-op
 }
 

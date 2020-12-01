@@ -121,7 +121,7 @@ func (this *httpRequest) Failed(srvr *server.Server) {
 	this.writeString("\n}\n")
 	this.writer.noMoreData()
 
-	this.stopAndAlert(server.FATAL)
+	this.Stop(server.FATAL)
 }
 
 func (this *httpRequest) markTimeOfCompletion(now time.Time) {
@@ -165,17 +165,11 @@ func (this *httpRequest) Execute(srvr *server.Server, context *execution.Context
 	state := this.State()
 	this.writeSuffix(srvr, state, this.prefix, this.indent)
 	this.writer.noMoreData()
-	this.Alert()
 }
 
 func (this *httpRequest) Expire(state server.State, timeout time.Duration) {
 	this.Error(errors.NewTimeoutError(timeout))
 	this.Stop(state)
-}
-
-func (this *httpRequest) stopAndAlert(state server.State) {
-	this.Stop(state)
-	this.Alert()
 }
 
 func (this *httpRequest) writePrefix(srvr *server.Server, signature value.Value, prefix, indent string) bool {
@@ -410,8 +404,8 @@ func (this *httpRequest) writeError(err errors.Error, count int, prefix, indent 
 	if err.Retry() {
 		m["retry"] = true
 	}
-	if err.Diagnostics() != nil {
-		m["diagnstics"] = err.Diagnostics()
+	if err.Cause() != nil {
+		m["cause"] = err.Cause()
 	}
 
 	var er error
@@ -589,6 +583,11 @@ func (this *httpRequest) writeControls(controls bool, prefix, indent string) boo
 			logging.Infop("Error writing memoryQuota", logging.Pair{"error", err})
 		}
 	}
+
+	if !this.writeString(",") || !this.writer.printf("%s\"stmtType\": \"%v\"", newPrefix, this.Type()) {
+		logging.Infop("Error writing Type")
+	}
+
 	this.writeTransactionInfo(newPrefix, indent)
 
 	if prefix != "" && !(this.writeString("\n") && this.writeString(prefix)) {
