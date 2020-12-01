@@ -1380,25 +1380,6 @@ func (this *builder) constructJoin(right algebra.SimpleFromTerm, onClause []expr
 	return rightPlanCopy, leftPlanCopy, primaryJoinKeys, newOnclause, newFilter, cost, cumCost, cardinality, nil
 }
 
-func (this *builder) getKeyspacesAliases(alias string) (
-	leftKeyspaces, leftAliases []string, rightKeyspace, rightAliase string) {
-
-	leftAliases = make([]string, 0, len(this.baseKeyspaces)-1)
-	leftKeyspaces = make([]string, 0, len(this.baseKeyspaces)-1)
-	for _, kspace := range this.baseKeyspaces {
-		if kspace.PlanDone() {
-			if kspace.Name() == alias {
-				rightAliase = kspace.Name()
-				rightKeyspace = kspace.Keyspace()
-			} else {
-				leftAliases = append(leftAliases, kspace.Name())
-				leftKeyspaces = append(leftKeyspaces, kspace.Keyspace())
-			}
-		}
-	}
-	return
-}
-
 func (this *builder) buildAnsiJoinSimpleFromTerm(node algebra.SimpleFromTerm, onclause expression.Expression) (
 	[]plan.Operator, expression.Expression, float64, float64, error) {
 

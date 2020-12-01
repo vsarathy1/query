@@ -492,7 +492,8 @@ func (this *builder) BuildJoin(right algebra.SimpleFromTerm, onClause []expressi
 			//			}
 			if useCBO && (cost > 0.0) && (cumCost > 0.0) && (cardinality > 0.0) && (selec > 0.0) && (filter != nil) {
 				selec = this.adjustForIndexFilters(right.Alias(), origOnclause, selec)
-				cost, cumCost, cardinality = getSimpleFilterCost(cost, cumCost, cardinality, selec)
+				cost, cumCost, cardinality = getSimpleFilterCost(this.baseKeyspaces, right.Alias(),
+					cost, cumCost, cardinality, selec)
 			}
 			//cumCost := leftPlan.GetCumCost() + cost
 			return plan.NewNLJoinJE(plan.NewSequence(scans.GetPlan()...), false /*for now */, newOnclause, right.Alias(), newFilter, cost, cumCost, joinCardinality), nil, probePlan /*.GetPlan()*/, nil
@@ -559,7 +560,9 @@ func (this *builder) BuildJoin(right algebra.SimpleFromTerm, onClause []expressi
 		//		}
 
 		if useCBO && (cost > 0.0) && (cumCost > 0.0) && (cardinality > 0.0) && (selec > 0.0) && (filter != nil) {
-			cost, cumCost, cardinality = getSimpleFilterCost(cost, cumCost, cardinality, selec)
+			cost, cumCost, cardinality = getSimpleFilterCost(this.baseKeyspaces, right.Alias(),
+				cost, cumCost, cardinality, selec)
+
 		}
 		//cumCost := leftPlan.GetCumCost() + cost
 		return plan.NewNLJoinJE(plan.NewSequence(scans.GetPlan()...), false /*for now */, newOnclause, right.Alias(), filter, cost, cumCost, joinCardinality), nil, probePlan, nil
