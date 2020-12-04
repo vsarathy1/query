@@ -36,6 +36,15 @@ func HasKeyspaceReferences(expr Expression, keyspaces map[string]string) bool {
 	return false
 }
 
+// check whether expr has references to any of the keyspaces
+func HasExactlyOneKeyspaceReference(expr Expression, keyspaces map[string]string) bool {
+	refs, err := CountKeySpaces(expr, keyspaces)
+	if err == nil && len(refs) == 1 {
+		return true
+	}
+	return false
+}
+
 type keyspaceCounter struct {
 	TraverserBase
 

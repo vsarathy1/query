@@ -101,7 +101,7 @@ func newIdxKeyDerive(keyExpr expression.Expression) *idxKeyDerive {
 
 // derive IS NOT NULL filters for a keyspace based on join filters in the
 // WHERE clause as well as ON-clause of inner joins
-func deriveNotNullFilter(keyspace datastore.Keyspace, baseKeyspace *base.BaseKeyspace, useCBO bool,
+func deriveNotNullFilter(keyspace datastore.Keyspace, baseKeyspace *base.BaseKeyspace, allKeyspaceNames map[string]string, useCBO bool,
 	indexApiVersion int, virtualIndexes []datastore.Index, advisorValidate bool,
 	context *PrepareContext) error {
 
@@ -229,8 +229,9 @@ func deriveNotNullFilter(keyspace datastore.Keyspace, baseKeyspace *base.BaseKey
 		}
 
 		for _, term := range terms {
-			// check whether the expression references current keyspace
-			if !expression.HasKeyspaceReferences(term, keyspaceNames) {
+			// check whether the expression references current keyspace and no other keyspace
+			if !expression.HasKeyspaceReferences(term, keyspaceNames) ||
+				!expression.HasExactlyOneKeyspaceReference(term, allKeyspaceNames) {
 				continue
 			}
 
