@@ -156,7 +156,7 @@ func getSimpleFromTermCost(baseKeyspaces map[string]*base.BaseKeyspace, left, ri
 	return OPT_COST_NOT_AVAIL, OPT_CARD_NOT_AVAIL
 }
 
-func getSimpleFromTermCost2(left, right plan.Operator, joinCardinality float64) (float64, float64, float64) {
+func getSimpleFromTermCost2(baseKeyspaces map[string]*base.BaseKeyspace, left, right plan.Operator, joinCardinality float64) (float64, float64, float64) {
 	return OPT_COST_NOT_AVAIL, OPT_COST_NOT_AVAIL, OPT_CARD_NOT_AVAIL
 }
 
@@ -172,7 +172,8 @@ func getFilterCost(lastOp plan.Operator, expr expression.Expression,
 }
 
 func getFilterCost2(lastOp plan.Operator, expr expression.Expression,
-	baseKeyspaces map[string]*base.BaseKeyspace, keyspaceNames map[string]string, advisorValidate bool) (float64, float64) {
+	baseKeyspaces map[string]*base.BaseKeyspace, keyspaceNames map[string]string,
+	alias string, advisorValidate bool, context *PrepareContext) (float64, float64) {
 	return OPT_COST_NOT_AVAIL, OPT_CARD_NOT_AVAIL
 }
 
