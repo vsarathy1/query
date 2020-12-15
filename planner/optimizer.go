@@ -23,7 +23,7 @@ import (
 
 type Optimizer interface {
 	Initialize(builder Builder)
-	OptimizeQueryBlock(node algebra.Node) ([]plan.Operator, []plan.Operator, []plan.CoveringOperator, plan.Operator, error)
+	OptimizeQueryBlock(node algebra.Node) ([]plan.Operator, []plan.Operator, []plan.CoveringOperator, plan.Operator, IndexPushDowns, error)
 	DoJoinEnumeration() bool
 	CheckJoinEnumConditions(map[string]*base.BaseKeyspace) bool
 }
@@ -288,10 +288,7 @@ func (this *builder) BuildScan(node algebra.SimpleFromTerm) ([]plan.Operator, []
 	this.subChildren = make([]plan.Operator, 0, 16)
 	this.coveringScans = nil
 	this.countScan = nil
-	this.order = nil
 	this.orderScan = nil
-	this.limit = nil
-	this.offset = nil
 	this.lastOp = nil
 
 	_, err := node.Accept(this)

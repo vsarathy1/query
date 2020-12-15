@@ -125,15 +125,18 @@ func (this *builder) visitFrom(node *algebra.Subselect, group *algebra.Group) er
 		if this.useCBO && this.context.Optimizer() != nil {
 			optimizer := this.context.Optimizer()
 			optimizer.Initialize(this.Copy())
-			op, subchildren, cov, lastOp, err := optimizer.OptimizeQueryBlock(node.From())
+			op, subchildren, cov, lastOp, idxPushDowns, err := optimizer.OptimizeQueryBlock(node.From())
+
 			if err != nil {
 				return err
 			}
+
 			if op != nil {
 				this.children = op
 				this.subChildren = subchildren
 				this.coveringScans = cov
 				this.lastOp = lastOp
+				this.IndexPushDowns = idxPushDowns
 			}
 
 			if op == nil && err == nil {
