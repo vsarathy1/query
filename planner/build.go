@@ -172,7 +172,11 @@ type indexPushDowns struct {
 type IndexPushDowns indexPushDowns
 
 func (this *IndexPushDowns) Copy(newIndexPushdowns *IndexPushDowns) {
-	newIndexPushdowns.order = this.order.Copy()
+    if this.order != nil {
+		newIndexPushdowns.order = this.order.Copy()
+    } else {
+		newIndexPushdowns.order = nil
+	}
 	newIndexPushdowns.limit = expression.Copy(this.limit)
 	newIndexPushdowns.offset = expression.Copy(this.offset)
 	newIndexPushdowns.oldAggregates = this.oldAggregates
