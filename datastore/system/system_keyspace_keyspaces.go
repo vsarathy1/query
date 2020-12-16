@@ -23,6 +23,7 @@ import (
 type keyspaceKeyspace struct {
 	keyspaceBase
 	skipSystem bool
+	info       bool
 	store      datastore.Datastore
 	indexer    datastore.Indexer
 }
@@ -99,7 +100,9 @@ func (b *keyspaceKeyspace) Count(context datastore.QueryContext) (int64, errors.
 									if scope != nil {
 										keyspaceIds, _ := scope.KeyspaceIds()
 										for _, keyspaceId := range keyspaceIds {
-
+											if b.skipSystem && keyspaceId[0] == '_' {
+												continue
+											}
 											if !canAccessAll && !canRead(context, namespaceId, object.Id, scopeId, keyspaceId) {
 												context.Warning(errors.NewSystemFilteredRowsWarning("system:keyspaces"))
 											} else {
@@ -199,12 +202,11 @@ func (b *keyspaceKeyspace) fetchOne(ns string, ks string, context datastore.Quer
 				"name":         keyspace.Name(),
 				"path":         path(namespace.Name(), keyspace.Name()),
 			})
-			if b.skipSystem {
-				count, err1 := keyspace.Count(context)
-				size, err2 := keyspace.Size(context)
-				if err1 == nil && err2 == nil {
-					doc.SetField("count", count)
-					doc.SetField("size", size)
+			if b.info {
+				res, err2 := keyspace.Stats(context, []datastore.KeyspaceStats{datastore.KEYSPACE_COUNT, datastore.KEYSPACE_SIZE})
+				if err2 == nil {
+					doc.SetField("count", res[0])
+					doc.SetField("size", res[1])
 				}
 			}
 			return doc, nil
@@ -246,12 +248,11 @@ func (b *keyspaceKeyspace) fetchOneCollection(ns, bn, sn, ks string, context dat
 						"scope":        scope.Name(),
 						"path":         path(namespace.Name(), bucket.Name(), scope.Name(), keyspace.Name()),
 					})
-					if b.skipSystem {
-						count, err1 := keyspace.Count(context)
-						size, err2 := keyspace.Size(context)
-						if err1 == nil && err2 == nil {
-							doc.SetField("count", count)
-							doc.SetField("size", size)
+					if b.info {
+						res, err2 := keyspace.Stats(context, []datastore.KeyspaceStats{datastore.KEYSPACE_COUNT, datastore.KEYSPACE_SIZE})
+						if err2 == nil {
+							doc.SetField("count", res[0])
+							doc.SetField("size", res[1])
 						}
 					}
 					return doc, nil
@@ -285,10 +286,11 @@ func (b *keyspaceKeyspace) Delete(deletes []value.Pair, context datastore.QueryC
 	return nil, errors.NewSystemNotImplementedError(nil, "")
 }
 
-func newKeyspacesKeyspace(p *namespace, store datastore.Datastore, name string, skipSystem bool) (*keyspaceKeyspace, errors.Error) {
+func newKeyspacesKeyspace(p *namespace, store datastore.Datastore, name string, skipSystem bool, info bool) (*keyspaceKeyspace, errors.Error) {
 	b := new(keyspaceKeyspace)
 	b.store = store
 	b.skipSystem = skipSystem
+	b.info = info
 	setKeyspaceBase(&b.keyspaceBase, p, name)
 
 	primary := &keyspaceIndex{name: "#primary", keyspace: b}

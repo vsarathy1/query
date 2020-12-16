@@ -137,11 +137,14 @@ type Server struct {
 	autoPrepare       bool
 	memoryQuota       uint64
 	atrCollection     string
+	numAtrs           int
+	settingsCallback  func(string, interface{})
 }
 
-// Default Keep Alive Length
+// Default and min Keep Alive Length
 
 const KEEP_ALIVE_DEFAULT = 1024 * 16
+const KEEP_ALIVE_MIN = 1024
 
 func NewServer(store datastore.Datastore, sys datastore.Systemstore, config clustering.ConfigurationStore,
 	acctng accounting.AccountingStore, namespace string, readonly bool,
@@ -149,19 +152,20 @@ func NewServer(store datastore.Datastore, sys datastore.Systemstore, config clus
 	timeout time.Duration, signature, metrics, enterprise, pretty bool,
 	srvprofile Profile, srvcontrols bool) (*Server, errors.Error) {
 	rv := &Server{
-		datastore:   store,
-		systemstore: sys,
-		configstore: config,
-		acctstore:   acctng,
-		namespace:   namespace,
-		readonly:    readonly,
-		signature:   signature,
-		timeout:     timeout,
-		metrics:     metrics,
-		enterprise:  enterprise,
-		pretty:      pretty,
-		srvcontrols: srvcontrols,
-		srvprofile:  srvprofile,
+		datastore:        store,
+		systemstore:      sys,
+		configstore:      config,
+		acctstore:        acctng,
+		namespace:        namespace,
+		readonly:         readonly,
+		signature:        signature,
+		timeout:          timeout,
+		metrics:          metrics,
+		enterprise:       enterprise,
+		pretty:           pretty,
+		srvcontrols:      srvcontrols,
+		srvprofile:       srvprofile,
+		settingsCallback: func(s string, v interface{}) {},
 	}
 
 	rv.unboundQueue.servicers = servicers
@@ -171,6 +175,7 @@ func NewServer(store datastore.Datastore, sys datastore.Systemstore, config clus
 	newTxRunQueues(&rv.transactionQueues, plusRequestsCap, _TX_QUEUE_SIZE)
 	store.SetLogLevel(logging.LogLevel())
 	rv.SetMaxParallelism(maxParallelism)
+	rv.SetNumAtrs(datastore.DEF_NUMATRS)
 
 	// set default values
 	rv.SetMaxIndexAPI(datastore.INDEX_API_MAX)
@@ -211,6 +216,14 @@ func NewServer(store datastore.Datastore, sys datastore.Systemstore, config clus
 func MetakvSubscribe() {
 	// Subscribe FTS Client Metakv information
 	queryMetakv.Subscribe(N1ftyMetakvNotifier, queryMetakv.FTSMetaDir, make(chan struct{}))
+}
+
+func (this *Server) SetSettingsCallback(f func(string, interface{})) {
+	this.settingsCallback = f
+}
+
+func (this *Server) SettingsCallback() func(string, interface{}) {
+	return this.settingsCallback
 }
 
 func (this *Server) Datastore() datastore.Datastore {
@@ -278,9 +291,6 @@ func (this *Server) KeepAlive() int {
 }
 
 func (this *Server) SetKeepAlive(keepAlive int) {
-	if keepAlive <= 0 {
-		keepAlive = KEEP_ALIVE_DEFAULT
-	}
 	atomic.StoreInt64(&this.keepAlive, int64(keepAlive))
 }
 
@@ -507,7 +517,15 @@ func (this *Server) AtrCollection() string {
 func (this *Server) SetAtrCollection(s string) {
 	this.atrCollection = s
 	datastore.GetTransactionSettings().SetAtrCollection(s)
+}
 
+func (this *Server) NumAtrs() int {
+	return this.numAtrs
+}
+
+func (this *Server) SetNumAtrs(i int) {
+	this.numAtrs = i
+	datastore.GetTransactionSettings().SetNumAtrs(i)
 }
 
 func (this *Server) Enterprise() bool {
@@ -867,10 +885,14 @@ func (this *Server) serviceRequest(request Request) {
 			buf := make([]byte, 1<<16)
 			n := runtime.Stack(buf, false)
 			s := string(buf[0:n])
-			logging.Severep("", logging.Pair{"panic", err},
-				logging.Pair{"stack", s})
+			logging.Severef("panic: %v ", err)
+			logging.Severef("request text: <ud>%v</ud>", request.Statement())
+			logging.Severef("query context: <ud>%v</ud>", request.QueryContext())
+			logging.Severef("stack: %v", s)
 			os.Stderr.WriteString(s)
 			os.Stderr.Sync()
+			request.Fail(errors.NewExecutionPanicError(nil, fmt.Sprintf("Panic: %v", err)))
+			request.Failed(this)
 		}
 	}()
 
@@ -878,13 +900,22 @@ func (this *Server) serviceRequest(request Request) {
 
 	context := request.ExecutionContext()
 	if request.TxId() != "" {
-		atrCollection := this.AtrCollection()
-		if request.AtrCollection() != "" {
-			atrCollection = request.AtrCollection()
+		err := context.TxContext().TxValid()
+		if err == nil {
+			atrCollection := this.AtrCollection()
+			if request.AtrCollection() != "" {
+				atrCollection = request.AtrCollection()
+			}
+			numAtrs := this.NumAtrs()
+			if request.NumAtrs() > 0 {
+				numAtrs = request.NumAtrs()
+			}
+			err = context.SetTransactionContext(request.Type(), request.TxImplicit(),
+				request.TxTimeout(), this.TxTimeout(), atrCollection, numAtrs,
+				request.TxData())
 		}
-		if err := context.SetTransactionContext(request.Type(), request.TxImplicit(),
-			request.TxTimeout(), this.TxTimeout(), atrCollection, request.NumAtrs(),
-			request.TxData()); err != nil {
+
+		if err != nil {
 			request.Fail(err)
 			request.Failed(this)
 			return
@@ -907,8 +938,12 @@ func (this *Server) serviceRequest(request Request) {
 			if request.AtrCollection() != "" {
 				atrCollection = request.AtrCollection()
 			}
+			numAtrs := this.NumAtrs()
+			if request.NumAtrs() > 0 {
+				numAtrs = request.NumAtrs()
+			}
 			if err = context.SetTransactionContext(request.Type(), request.TxImplicit(),
-				request.TxTimeout(), this.TxTimeout(), atrCollection, request.NumAtrs(),
+				request.TxTimeout(), this.TxTimeout(), atrCollection, numAtrs,
 				request.TxData()); err != nil {
 				request.Fail(err)
 			}

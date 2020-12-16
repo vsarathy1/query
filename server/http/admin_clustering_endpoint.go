@@ -21,6 +21,7 @@ import (
 	json "github.com/couchbase/go_json"
 	"github.com/couchbase/query/audit"
 	"github.com/couchbase/query/clustering"
+	"github.com/couchbase/query/datastore"
 	"github.com/couchbase/query/distributed"
 	"github.com/couchbase/query/errors"
 	"github.com/couchbase/query/functions"
@@ -412,6 +413,7 @@ func doSettings(endpoint *HttpEndpoint, w http.ResponseWriter, req *http.Request
 		if errP != nil {
 			return nil, errP
 		}
+		settings = map[string]interface{}{}
 		return fillSettings(settings, srvr), nil
 	default:
 		return nil, errors.NewServiceErrorHttpMethod(req.Method)
@@ -444,6 +446,7 @@ func fillSettings(settings map[string]interface{}, srvr *server.Server) map[stri
 	settings[server.CPUPROFILE] = srvr.CpuProfile()
 	settings[server.MEMPROFILE] = srvr.MemProfile()
 	settings[server.SERVICERS] = srvr.Servicers()
+	settings[server.PLUSSERVICERS] = srvr.PlusServicers()
 	settings[server.SCANCAP] = srvr.ScanCap()
 	settings[server.REQUESTSIZECAP] = srvr.RequestSizeCap()
 	settings[server.DEBUG] = srvr.Debug()
@@ -470,6 +473,12 @@ func fillSettings(settings map[string]interface{}, srvr *server.Server) map[stri
 	settings[server.MEMORYQUOTA] = srvr.MemoryQuota()
 	settings[server.USECBO] = srvr.UseCBO()
 	settings[server.ATRCOLLECTION] = srvr.AtrCollection()
+	settings[server.NUMATRS] = srvr.NumAtrs()
+
+	tranSettings := datastore.GetTransactionSettings()
+	settings[server.CLEANUPWINDOW] = tranSettings.CleanupWindow().String()
+	settings[server.CLEANUPCLIENTATTEMPTS] = tranSettings.CleanupClientAttempts()
+	settings[server.CLEANUPLOSTATTEMPTS] = tranSettings.CleanupLostAttempts()
 	return settings
 }
 

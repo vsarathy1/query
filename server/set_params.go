@@ -10,10 +10,12 @@
 package server
 
 import (
+	"strings"
 	"time"
 
 	gsi "github.com/couchbase/indexing/secondary/queryport/n1ql"
 	ftsclient "github.com/couchbase/n1fty"
+	"github.com/couchbase/query/datastore"
 	"github.com/couchbase/query/errors"
 	"github.com/couchbase/query/functions"
 	"github.com/couchbase/query/logging"
@@ -39,6 +41,7 @@ var _SETTERS = map[string]Setter{
 	KEEPALIVELENGTH: func(s *Server, o interface{}) errors.Error {
 		value := getNumber(o)
 		s.SetKeepAlive(int(value))
+		s.SettingsCallback()(KEEPALIVELENGTH, int(value))
 		return nil
 	},
 	LOGLEVEL: func(s *Server, o interface{}) errors.Error {
@@ -79,6 +82,11 @@ var _SETTERS = map[string]Setter{
 	SERVICERS: func(s *Server, o interface{}) errors.Error {
 		value := getNumber(o)
 		s.SetServicers(int(value))
+		return nil
+	},
+	PLUSSERVICERS: func(s *Server, o interface{}) errors.Error {
+		value := getNumber(o)
+		s.SetPlusServicers(int(value))
 		return nil
 	},
 	TIMEOUTSETTING: func(s *Server, o interface{}) errors.Error {
@@ -172,6 +180,26 @@ var _SETTERS = map[string]Setter{
 		}
 		return nil
 	},
+	NUMATRS: func(s *Server, o interface{}) errors.Error {
+		s.SetNumAtrs(int(getNumber(o)))
+		return nil
+	},
+	CLEANUPWINDOW: func(s *Server, o interface{}) errors.Error {
+		datastore.GetTransactionSettings().SetCleanupWindow(getDuration(o))
+		return nil
+	},
+	CLEANUPCLIENTATTEMPTS: func(s *Server, o interface{}) errors.Error {
+		if value, ok := o.(bool); ok {
+			datastore.GetTransactionSettings().SetCleanupClientAttempts(value)
+		}
+		return nil
+	},
+	CLEANUPLOSTATTEMPTS: func(s *Server, o interface{}) errors.Error {
+		if value, ok := o.(bool); ok {
+			datastore.GetTransactionSettings().SetCleanupLostAttempts(value)
+		}
+		return nil
+	},
 }
 
 func getNumber(o interface{}) float64 {
@@ -239,29 +267,43 @@ func setCompleted(s *Server, o interface{}) errors.Error {
 func ProcessSettings(settings map[string]interface{}, srvr *Server) (err errors.Error) {
 	for setting, value := range settings {
 		var cerr errors.Error
-		check_it, ok := CHECKERS[setting]
-		if ok {
-			ok, cerr = check_it(value)
-		}
 
-		if !ok {
-			if cerr == nil {
-				cerr = errors.NewAdminSettingTypeError(setting, value)
+		s := strings.ToLower(setting)
+		ok := false
+		check_it, found := CHECKERS[s]
+		if found {
+			ok, cerr = check_it(value)
+		} else {
+			var min int
+
+			min, found = CHECKERS_MIN[s]
+			if found {
+				ok, cerr = checkNumberMin(value, min)
+			}
+		}
+		if found && ok {
+			set_it := _SETTERS[s]
+			serr := set_it(srvr, value)
+			if serr == nil {
+				logging.Infof("Query Configuration changed for %v. New value is %v", s, value)
+			} else {
+				logging.Infof("Could not change query Configuration %v to %v: %v", s, value, serr)
+			}
+		} else {
+			if !found {
+				cerr = errors.NewAdminUnknownSettingError(setting)
 				logging.Infof("Query Configuration %v", cerr.Error())
 			} else {
-				logging.Infof("Query Configuration incorrect value %v for setting: %s, error: %v ", value, setting, cerr)
+				if cerr == nil {
+					cerr = errors.NewAdminSettingTypeError(setting, value)
+					logging.Infof("Query Configuration %v", cerr.Error())
+				} else {
+					logging.Infof("Query Configuration incorrect value %v for setting: %s, error: %v ", value, s, cerr)
+				}
 			}
 
 			if err == nil {
 				err = cerr
-			}
-		} else {
-			set_it := _SETTERS[setting]
-			serr := set_it(srvr, value)
-			if serr == nil {
-				logging.Infof("Query Configuration changed for %v. New value is %v", setting, value)
-			} else {
-				logging.Infof("Could not change query Configuration %v to %v: %v", setting, value, serr)
 			}
 		}
 	}
@@ -290,7 +332,10 @@ func SetParamValuesForAll(cfg queryMetakv.Config, srvr *Server) {
 			if ok && paramName == "curl_whitelist" {
 				// Set the whitelist value to pass to context
 				srvr.SetWhitelist(val.(map[string]interface{}))
-				logging.Infof("New Value for curl whitelist <ud>%v</ud>", val)
+				logging.Infof("New Value for curl allowedlist <ud>%v</ud>", val)
+			} else if ok && paramName == "curl_allowedlist" {
+				srvr.SetWhitelist(val.(map[string]interface{}))
+				logging.Infof("New Value for curl allowedlist <ud>%v</ud>", val)
 			} else {
 				querySettings[key] = val
 			}

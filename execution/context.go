@@ -408,7 +408,7 @@ func (this *Context) UrlCredentials(urlS string) *auth.Credentials {
 
 	authenticator := cbauth.Default
 	u, p, _ := authenticator.GetHTTPServiceAuth(urlS)
-	return &auth.Credentials{map[string]string{u: p}, nil}
+	return &auth.Credentials{map[string]string{u: p}, nil, nil, nil}
 }
 
 func (this *Context) ScanConsistency() datastore.ScanConsistency {
@@ -895,6 +895,9 @@ func (this *Context) assert(test bool, what string) bool {
 
 func (this *Context) Recover(base *base) {
 	err := recover()
+	if err == nil && base != nil {
+		err = base.panicErr
+	}
 	if err != nil {
 		buf := make([]byte, 1<<16)
 		n := runtime.Stack(buf, false)

@@ -19,6 +19,7 @@ package couchbase
 import (
 	"encoding/binary"
 	"fmt"
+	"io"
 	"math"
 	"net/http"
 	"net/url"
@@ -330,7 +331,6 @@ func (s *store) Authorize(privileges *auth.Privileges, credentials *auth.Credent
 		logging.Warnf("CbAuth not intialized")
 		return nil, nil
 	}
-
 	return cbAuthorize(s, privileges, credentials)
 }
 
@@ -745,10 +745,11 @@ type keyspaceEntry struct {
 }
 
 const (
-	_MIN_ERR_INTERVAL   time.Duration = 5 * time.Second
-	_THROTTLING_TIMEOUT time.Duration = 10 * time.Millisecond
-	_CLEANUP_INTERVAL   time.Duration = time.Hour
-	_REFRESH_THRESHOLD  time.Duration = 100 * time.Millisecond
+	_MIN_ERR_INTERVAL            time.Duration = 5 * time.Second
+	_THROTTLING_TIMEOUT          time.Duration = 10 * time.Millisecond
+	_CLEANUP_INTERVAL            time.Duration = time.Hour
+	_NAMESPACE_REFRESH_THRESHOLD time.Duration = 100 * time.Millisecond
+	_STATS_REFRESH_THRESHOLD     time.Duration = 1 * time.Second
 )
 
 func (p *namespace) DatastoreId() string {
@@ -1041,7 +1042,7 @@ func (p *namespace) getPool() *cb.Pool {
 }
 
 func (p *namespace) refresh() {
-	if util.Since(p.last) < _REFRESH_THRESHOLD {
+	if util.Since(p.last) < _NAMESPACE_REFRESH_THRESHOLD {
 		return
 	}
 
@@ -1229,6 +1230,7 @@ type keyspace struct {
 	newCollectionsManifestUid uint64            // announced manifest id
 	scopes                    map[string]*scope // scopes by id
 	defaultCollection         datastore.Keyspace
+	last                      util.Time // last refresh
 }
 
 var _NO_SCOPES map[string]*scope = map[string]*scope{}
@@ -1317,18 +1319,23 @@ func (p *namespace) KeyspaceDeleteCallback(name string, err error) {
 	p.lock.Unlock()
 
 	if cbKeyspace != nil {
-		// dropDictCacheEntries() needs to be called outside p.lock
-		// since it'll need to lock it when trying to delete from
-		// N1QL_SYSTEM_BUCKET.N1QL_SYSTEM_SCOPE.N1QL_CBO_STATS
-		dropDictCacheEntries(cbKeyspace)
+		if isSysBucket(cbKeyspace.name) {
+			DropDictionaryCache()
+		} else {
+			// dropDictCacheEntries() needs to be called outside p.lock
+			// since it'll need to lock it when trying to delete from
+			// N1QL_SYSTEM_BUCKET.N1QL_SYSTEM_SCOPE.N1QL_CBO_STATS
+			dropDictCacheEntries(cbKeyspace)
+		}
 	}
 }
 
 // Called by go-couchbase if a configured keyspace is updated
 func (p *namespace) KeyspaceUpdateCallback(bucket *cb.Bucket) {
 
+	checkSysBucket := false
+
 	p.lock.Lock()
-	defer p.lock.Unlock()
 
 	ks, ok := p.keyspaceCache[bucket.Name]
 	if ok && ks.cbKeyspace != nil {
@@ -1337,10 +1344,19 @@ func (p *namespace) KeyspaceUpdateCallback(bucket *cb.Bucket) {
 		if ks.cbKeyspace.collectionsManifestUid != uid {
 			ks.cbKeyspace.flags |= _NEEDS_MANIFEST
 			ks.cbKeyspace.newCollectionsManifestUid = uid
+			if isSysBucket(ks.cbKeyspace.name) {
+				checkSysBucket = true
+			}
 		}
 		ks.cbKeyspace.Unlock()
 	} else {
 		logging.Warnf("Keyspace %v not configured on this server", bucket.Name)
+	}
+
+	p.lock.Unlock()
+
+	if checkSysBucket {
+		chkSysBucket()
 	}
 }
 
@@ -1392,8 +1408,41 @@ func (b *keyspace) Count(context datastore.QueryContext) (int64, errors.Error) {
 	return b.count(context)
 }
 
+func (b *keyspace) needsTimeRefresh(threshold time.Duration) bool {
+	now := util.Now()
+	if now.Sub(b.last) < threshold {
+		return false
+	}
+	b.Lock()
+	b.last = now
+	b.Unlock()
+	return true
+}
+
+var ds2cb = []cb.BucketStats{
+	cb.StatCount,
+	cb.StatSize,
+}
+
+func (b *keyspace) Stats(context datastore.QueryContext, which []datastore.KeyspaceStats) ([]int64, errors.Error) {
+	return b.stats(context, which)
+}
+
+func (b *keyspace) stats(context datastore.QueryContext, which []datastore.KeyspaceStats, clientContext ...*memcached.ClientContext) ([]int64, errors.Error) {
+	cbWhich := make([]cb.BucketStats, len(which))
+	for i, f := range which {
+		cbWhich[i] = ds2cb[f]
+	}
+	res, err := b.cbbucket.GetIntStats(b.needsTimeRefresh(_STATS_REFRESH_THRESHOLD), cbWhich, clientContext...)
+	if err != nil {
+		b.checkRefresh(err)
+		return nil, errors.NewCbKeyspaceCountError(err, b.fullName)
+	}
+	return res, nil
+}
+
 func (b *keyspace) count(context datastore.QueryContext, clientContext ...*memcached.ClientContext) (int64, errors.Error) {
-	count, err := b.cbbucket.GetCount(true, clientContext...)
+	count, err := b.cbbucket.GetCount(b.needsTimeRefresh(_STATS_REFRESH_THRESHOLD), clientContext...)
 	if err != nil {
 		b.checkRefresh(err)
 		return 0, errors.NewCbKeyspaceCountError(err, b.fullName)
@@ -1406,7 +1455,7 @@ func (b *keyspace) Size(context datastore.QueryContext) (int64, errors.Error) {
 }
 
 func (b *keyspace) size(context datastore.QueryContext, clientContext ...*memcached.ClientContext) (int64, errors.Error) {
-	size, err := b.cbbucket.GetSize(true, clientContext...)
+	size, err := b.cbbucket.GetSize(b.needsTimeRefresh(_STATS_REFRESH_THRESHOLD), clientContext...)
 	if err != nil {
 		b.checkRefresh(err)
 		return 0, errors.NewCbKeyspaceSizeError(err, b.fullName)
@@ -1893,6 +1942,12 @@ func (b *keyspace) Release(bclose bool) {
 	}
 	if agentProvider != nil {
 		agentProvider.Close()
+	}
+
+	// close an ftsIndexer that belongs to this keyspace
+	if ftsIndexerCloser, ok := b.ftsIndexer.(io.Closer); ok {
+		// FTSIndexer implements a Close() method
+		ftsIndexerCloser.Close()
 	}
 }
 

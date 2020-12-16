@@ -28,9 +28,10 @@ const (
 )
 
 const (
-	DEF_TXTIMEOUT          = 2 * time.Minute
+	DEF_TXTIMEOUT          = 15 * time.Second
 	DEF_DURABILITY_TIMEOUT = 2500 * time.Millisecond
 	DEF_DURABILITY_LEVEL   = DL_MAJORITY
+	DEF_NUMATRS            = 1024
 )
 
 func DurabilityNameToLevel(n string) DurabilityLevel {
@@ -64,4 +65,8 @@ func IsolationLevelToName(l IsolationLevel) string {
 		return _IsolationLevelNames[i]
 	}
 	return "unknown"
+}
+
+type TransactionMemory interface {
+	TransactionUsedMemory() int64
 }

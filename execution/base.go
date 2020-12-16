@@ -146,6 +146,7 @@ type base struct {
 	activeCond     sync.Cond
 	activeLock     sync.Mutex
 	opState        opState
+	panicErr       interface{}
 }
 
 const _ITEM_CAP = 512
@@ -256,6 +257,14 @@ func (this *base) reopen(context *Context) bool {
 }
 
 func (this *base) close(context *Context) {
+	err := recover()
+	if err != nil {
+		this.panicErr = err
+		return
+	} else if this.panicErr != nil {
+		return
+	}
+
 	this.valueExchange.close()
 
 	if this.output != nil {
@@ -338,7 +347,7 @@ func (this *base) baseReopen(context *Context) bool {
 
 	// the request terminated, a stop was sent, or something catastrophic happened
 	// cannot reopen, bail out
-	if this.opState == _DONE || this.opState == _ENDED || this.opState == _KILLED || this.opState == _PANICKED {
+	if this.opState == _STOPPED || this.opState == _DONE || this.opState == _ENDED || this.opState == _KILLED || this.opState == _PANICKED {
 		this.activeCond.L.Unlock()
 		return false
 	}
@@ -529,8 +538,17 @@ func (this *base) baseSendAction(action opAction) bool {
 	// PANICKED, COMPLETED and STOPPED have already sent a notifyStop
 	// DONE, ENDED and KILLED can no longer be operated upon
 	if this.stopped && !this.valueExchange.isWaiting() {
-		opState := this.opState
-		return opState == _RUNNING || opState == _STOPPING || opState == _PAUSED
+		switch this.opState {
+		case _PAUSED:
+			if action == _ACTION_PAUSE {
+				return true
+			}
+			// _ACTION_STOP has to take the slow route
+		case _RUNNING, _STOPPING:
+			return true
+		default:
+			return false
+		}
 	}
 
 	// STOPPED, COMPLETED, DONE, ENDED, KILLED have already sent signals or stopped operating
@@ -554,15 +572,15 @@ func (this *base) baseSendAction(action opAction) bool {
 		}
 		this.activeCond.L.Unlock()
 	case _RUNNING:
-		rv = true
 		this.opState = _STOPPING
 		this.activeCond.L.Unlock()
+		rv = true
 		this.switchPhase(_CHANTIME)
 		this.valueExchange.sendStop()
 		this.switchPhase(_EXECTIME)
 	case _STOPPING:
-		rv = true
 		this.activeCond.L.Unlock()
+		rv = true
 	default:
 		this.activeCond.L.Unlock()
 	}
@@ -765,11 +783,25 @@ func (this *base) childrenWait(n int) bool {
 }
 
 // wait for at least n children to complete ignoring stop messages
-func (this *base) childrenWaitNoStop(n int) {
+func (this *base) childrenWaitNoStop(ops ...Operator) {
 	this.switchPhase(_CHANTIME)
-	for n > 0 {
-		this.ValueExchange().retrieveChildNoStop()
-		n--
+	for _, o := range ops {
+		b := o.getBase()
+		b.activeCond.L.Lock()
+		state := b.opState
+		b.activeCond.L.Unlock()
+		switch state {
+		case _RUNNING, _STOPPING, _COMPLETED, _STOPPED:
+			// signal reliably sent
+			this.ValueExchange().retrieveChildNoStop()
+		case _CREATED, _PAUSED, _KILLED, _PANICKED:
+			// signal reliably not sent
+		default:
+
+			// we are waiting after we've sent a stop but before we have terminated
+			// flag bad states
+			assert(false, fmt.Sprintf("child has unexpected state %v", state))
+		}
 	}
 	this.switchPhase(_EXECTIME)
 }
@@ -908,8 +940,15 @@ func (this *base) readonly() bool {
 
 // Unblock all dependencies.
 func (this *base) notify() {
-	this.notifyStop()
-	this.notifyParent()
+	err := recover()
+	if err != nil {
+		this.panicErr = err
+		return
+	}
+	if this.panicErr == nil {
+		this.notifyStop()
+		this.notifyParent()
+	}
 }
 
 // release parent resources, if necessary

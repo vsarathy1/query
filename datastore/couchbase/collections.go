@@ -11,6 +11,7 @@ package couchbase
 
 import (
 	"fmt"
+	"io"
 	"strconv"
 	"sync"
 
@@ -192,6 +193,10 @@ func (coll *collection) Scope() datastore.Scope {
 	return coll.scope
 }
 
+func (coll *collection) Stats(context datastore.QueryContext, which []datastore.KeyspaceStats) ([]int64, errors.Error) {
+	return coll.bucket.stats(context, which, &memcached.ClientContext{CollId: coll.uid})
+}
+
 func (coll *collection) Count(context datastore.QueryContext) (int64, errors.Error) {
 	return coll.bucket.count(context, &memcached.ClientContext{CollId: coll.uid})
 }
@@ -311,8 +316,12 @@ func (coll *collection) Delete(deletes []value.Pair, context datastore.QueryCont
 		deletes, context, &memcached.ClientContext{CollId: coll.uid})
 }
 
-func (coll *collection) Release(blcose bool) {
-	// do nothing
+func (coll *collection) Release(bclose bool) {
+	// close an ftsIndexer that belongs to this keyspace
+	if ftsIndexerCloser, ok := coll.ftsIndexer.(io.Closer); ok {
+		// FTSIndexer implements a Close() method
+		ftsIndexerCloser.Close()
+	}
 }
 
 func (coll *collection) Flush() errors.Error {
@@ -470,9 +479,13 @@ func refreshScopesAndCollections(mani *cb.Manifest, bucket *keyspace) (map[strin
 
 		// clear collections that have disappeared
 		if oldScope != nil {
-			for n, _ := range oldScope.keyspaces {
+			for n, val := range oldScope.keyspaces {
 				if scope.keyspaces[n] == nil {
 					DropDictionaryEntry(oldScope.keyspaces[n].QualifiedName())
+				}
+				if val != nil {
+					// invoke Release(..) on collection for any cleanup
+					val.Release(false)
 				}
 			}
 		}
@@ -502,6 +515,8 @@ func clearOldScope(bucket *keyspace, s *scope) {
 		if val != nil {
 			s.keyspaces[n] = nil
 			DropDictionaryEntry(val.QualifiedName())
+			// invoke Release(..) on collection for any cleanup
+			val.Release(false)
 		}
 	}
 

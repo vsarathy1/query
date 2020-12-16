@@ -18,73 +18,86 @@ import (
 )
 
 const (
-	CPUPROFILE      = "cpuprofile"
-	DEBUG           = "debug"
-	KEEPALIVELENGTH = "keep-alive-length"
-	LOGLEVEL        = "loglevel"
-	MAXPARALLELISM  = "max-parallelism"
-	MEMPROFILE      = "memprofile"
-	REQUESTSIZECAP  = "request-size-cap"
-	PIPELINEBATCH   = "pipeline-batch"
-	PIPELINECAP     = "pipeline-cap"
-	SCANCAP         = "scan-cap"
-	SERVICERS       = "servicers"
-	TIMEOUTSETTING  = "timeout"
-	CMPOBJECT       = "completed"
-	CMPTHRESHOLD    = "completed-threshold"
-	CMPLIMIT        = "completed-limit"
-	CMPPUSH         = "+completed-limit"
-	CMPPOP          = "-completed-limit"
-	PRPLIMIT        = "prepared-limit"
-	PRETTY          = "pretty"
-	MAXINDEXAPI     = "max-index-api"
-	PROFILE         = "profile"
-	CONTROLS        = "controls"
-	N1QLFEATCTRL    = "n1ql-feat-ctrl"
-	AUTOPREPARE     = "auto-prepare"
-	MUTEXPROFILE    = "mutexprofile"
-	FUNCLIMIT       = "functions-limit"
-	TASKLIMIT       = "tasks-limit"
-	MEMORYQUOTA     = "memory-quota"
-	USECBO          = "use-cbo"
-	TXTIMEOUT       = "txtimeout"
-	ATRCOLLECTION   = "atrcollection"
+	CPUPROFILE            = "cpuprofile"
+	DEBUG                 = "debug"
+	KEEPALIVELENGTH       = "keep-alive-length"
+	LOGLEVEL              = "loglevel"
+	MAXPARALLELISM        = "max-parallelism"
+	MEMPROFILE            = "memprofile"
+	REQUESTSIZECAP        = "request-size-cap"
+	PIPELINEBATCH         = "pipeline-batch"
+	PIPELINECAP           = "pipeline-cap"
+	SCANCAP               = "scan-cap"
+	SERVICERS             = "servicers"
+	PLUSSERVICERS         = "plus-servicers"
+	TIMEOUTSETTING        = "timeout"
+	CMPOBJECT             = "completed"
+	CMPTHRESHOLD          = "completed-threshold"
+	CMPLIMIT              = "completed-limit"
+	CMPPUSH               = "+completed-limit"
+	CMPPOP                = "-completed-limit"
+	PRPLIMIT              = "prepared-limit"
+	PRETTY                = "pretty"
+	MAXINDEXAPI           = "max-index-api"
+	PROFILE               = "profile"
+	CONTROLS              = "controls"
+	N1QLFEATCTRL          = "n1ql-feat-ctrl"
+	AUTOPREPARE           = "auto-prepare"
+	MUTEXPROFILE          = "mutexprofile"
+	FUNCLIMIT             = "functions-limit"
+	TASKLIMIT             = "tasks-limit"
+	MEMORYQUOTA           = "memory-quota"
+	USECBO                = "use-cbo"
+	TXTIMEOUT             = "txtimeout"
+	ATRCOLLECTION         = "atrcollection"
+	NUMATRS               = "numatrs"
+	CLEANUPWINDOW         = "cleanupwindow"
+	CLEANUPCLIENTATTEMPTS = "cleanupclientattempts"
+	CLEANUPLOSTATTEMPTS   = "cleanuplostattempts"
 )
 
 type Checker func(interface{}) (bool, errors.Error)
 
 var CHECKERS = map[string]Checker{
-	CPUPROFILE:      checkString,
-	DEBUG:           checkBool,
-	KEEPALIVELENGTH: checkNumber,
-	LOGLEVEL:        checkLogLevel,
-	MAXPARALLELISM:  checkNumber,
-	MEMPROFILE:      checkString,
-	REQUESTSIZECAP:  checkNumber,
-	PIPELINEBATCH:   checkNumber,
-	PIPELINECAP:     checkNumber,
-	SCANCAP:         checkNumber,
-	SERVICERS:       checkNumber,
-	TIMEOUTSETTING:  checkNumber,
-	CMPOBJECT:       checkCompleted,
-	CMPTHRESHOLD:    checkNumber,
-	CMPLIMIT:        checkNumber,
-	CMPPUSH:         checkPositiveInteger,
-	CMPPOP:          checkPositiveInteger,
-	PRPLIMIT:        checkPositiveInteger,
-	PRETTY:          checkBool,
-	MAXINDEXAPI:     checkNumber,
-	PROFILE:         checkProfileAdmin,
-	CONTROLS:        checkControlsAdmin,
-	N1QLFEATCTRL:    checkNumber,
-	AUTOPREPARE:     checkBool,
-	MUTEXPROFILE:    checkBool,
-	FUNCLIMIT:       checkPositiveInteger,
-	TASKLIMIT:       checkPositiveInteger,
-	MEMORYQUOTA:     checkNonNegativeInteger,
-	USECBO:          checkBool,
-	TXTIMEOUT:       checkDuration,
-	ATRCOLLECTION:   checkPath,
+	CPUPROFILE:            checkString,
+	DEBUG:                 checkBool,
+	LOGLEVEL:              checkLogLevel,
+	MAXPARALLELISM:        checkNumber,
+	MEMPROFILE:            checkString,
+	REQUESTSIZECAP:        checkNumber,
+	PIPELINEBATCH:         checkNumber,
+	PIPELINECAP:           checkNumber,
+	SCANCAP:               checkNumber,
+	TIMEOUTSETTING:        checkNumber,
+	CMPOBJECT:             checkCompleted,
+	CMPTHRESHOLD:          checkNumber,
+	CMPLIMIT:              checkNumber,
+	PRETTY:                checkBool,
+	MAXINDEXAPI:           checkNumber,
+	PROFILE:               checkProfileAdmin,
+	CONTROLS:              checkControlsAdmin,
+	N1QLFEATCTRL:          checkNumber,
+	AUTOPREPARE:           checkBool,
+	MUTEXPROFILE:          checkBool,
+	USECBO:                checkBool,
+	TXTIMEOUT:             checkDuration,
+	ATRCOLLECTION:         checkPath,
+	CLEANUPWINDOW:         checkDuration,
+	CLEANUPCLIENTATTEMPTS: checkBool,
+	CLEANUPLOSTATTEMPTS:   checkBool,
+}
+
+var CHECKERS_MIN = map[string]int{
+	KEEPALIVELENGTH: KEEP_ALIVE_MIN,
+	CMPPUSH:         2,
+	CMPPOP:          2,
+	SERVICERS:       1,
+	PLUSSERVICERS:   1,
+	PRPLIMIT:        2,
+	FUNCLIMIT:       2,
+	TASKLIMIT:       2,
+	MEMORYQUOTA:     0,
+	NUMATRS:         2,
 }
 
 func checkBool(val interface{}) (bool, errors.Error) {
@@ -98,6 +111,16 @@ func checkNumber(val interface{}) (bool, errors.Error) {
 		return true, nil
 	case float64:
 		return true, nil
+	}
+	return false, nil
+}
+
+func checkNumberMin(val interface{}, min int) (bool, errors.Error) {
+	switch val := val.(type) {
+	case int64:
+		return val >= int64(min), nil
+	case float64:
+		return val >= float64(min), nil
 	}
 	return false, nil
 }
@@ -147,26 +170,6 @@ func checkCompleted(val interface{}) (bool, errors.Error) {
 		}
 	}
 	return ok, nil
-}
-
-func checkPositiveInteger(val interface{}) (bool, errors.Error) {
-	switch val := val.(type) {
-	case int64:
-		return (val > 1), nil
-	case float64:
-		return (val > 1), nil
-	}
-	return false, nil
-}
-
-func checkNonNegativeInteger(val interface{}) (bool, errors.Error) {
-	switch val := val.(type) {
-	case int64:
-		return (val >= 0), nil
-	case float64:
-		return (val >= 0), nil
-	}
-	return false, nil
 }
 
 func checkString(val interface{}) (bool, errors.Error) {
