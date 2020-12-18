@@ -26,6 +26,7 @@ type Optimizer interface {
 	OptimizeQueryBlock(node algebra.Node) ([]plan.Operator, []plan.Operator, []plan.CoveringOperator, plan.Operator, IndexPushDowns, error)
 	DoJoinEnumeration() bool
 	CheckJoinEnumConditions(map[string]*base.BaseKeyspace) bool
+	GetBuilder() Builder
 }
 type IntermediatePlan interface {
 	GetPlan() []plan.Operator

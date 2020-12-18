@@ -132,11 +132,15 @@ func (this *builder) visitFrom(node *algebra.Subselect, group *algebra.Group) er
 			}
 
 			if op != nil {
+				this.filter = optimizer.GetBuilder().GetFilter()
 				this.children = op
 				this.subChildren = subchildren
 				this.coveringScans = cov
 				this.lastOp = lastOp
 				this.IndexPushDowns = idxPushDowns
+				for _, baseKeyspace := range this.baseKeyspaces {
+					baseKeyspace.SetPlanDone()
+				}
 			}
 
 			if op == nil && err == nil {
