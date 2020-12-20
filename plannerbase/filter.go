@@ -70,6 +70,7 @@ func (this *Filter) Copy() *Filter {
 		fltrExpr:  this.fltrExpr.Copy(),
 		fltrFlags: this.fltrFlags,
 		selec:     this.selec,
+		adjSelec:  this.adjSelec,
 		arrSelec:  this.arrSelec,
 	}
 
